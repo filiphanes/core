@@ -31,6 +31,7 @@ static bool mail_user_settings_expand_check(void *_set, pool_t pool ATTR_UNUSED,
 static const struct setting_define mail_storage_setting_defines[] = {
 	DEF(SET_STR_VARS, mail_location),
 	{ SET_ALIAS, "mail", 0, NULL },
+	DEF(SET_STR_VARS, mail_fs),
 	DEF(SET_STR_VARS, mail_attachment_fs),
 	DEF(SET_STR_VARS, mail_attachment_dir),
 	DEF(SET_STR, mail_attachment_hash),
@@ -98,6 +99,7 @@ static const struct setting_define mail_storage_setting_defines[] = {
 
 const struct mail_storage_settings mail_storage_default_settings = {
 	.mail_location = "",
+	.mail_fs = "posix",
 	.mail_attachment_fs = "sis posix",
 	.mail_attachment_dir = "",
 	.mail_attachment_hash = "%{sha1}",

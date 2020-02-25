@@ -33,11 +33,11 @@ enum dbox_index_header_flags {
 struct dbox_storage_vfuncs {
 	/* dbox file has zero references now. it should be either freed or
 	   left open in case it's accessed again soon */
-	void (*file_unrefed)(struct dbox_file *file);
+	void (*file_free)(struct dbox_file *file);
 	/* create a new file using the same permissions as file.
 	   if parents=TRUE, create the directory if necessary */
-	int (*file_create_fd)(struct dbox_file *file, const char *path,
-			      bool parents);
+	struct fs_file *(*file_init_fs_file)(struct dbox_file *file,
+					 const char *path, bool parents);
 	/* open the mail and return its file/offset */
 	int (*mail_open)(struct dbox_mail *mail, uoff_t *offset_r,
 			 struct dbox_file **file_r);
@@ -58,6 +58,8 @@ struct dbox_storage {
 	struct mail_storage storage;
 	struct dbox_storage_vfuncs v;
 
+	struct fs *mail_fs;
+	const char *mail_dir;
 	struct fs *attachment_fs;
 	const char *attachment_dir;
 };
@@ -82,4 +84,16 @@ int dbox_verify_alt_storage(struct mailbox_list *list);
 bool dbox_header_have_flag(struct mailbox *box, uint32_t ext_id,
 			   unsigned int flags_offset, uint8_t flag);
 
+#endif
+
+#ifdef NDEBUG
+#define FUNC_START() ((void)0)
+#define FUNC_END() ((void)0)
+#define FUNC_END_RET(ignore) ((void)0)
+#define FUNC_END_RET_INT(ignore) ((void)0)
+#else
+#define FUNC_START()			i_debug("%s:%d start %s()", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END()				i_debug("%s:%d end %s()", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END_RET(ret)		i_debug("%s:%d end %s() -> %s", __FILE__, __LINE__, __FUNCTION__, ret)
+#define FUNC_END_RET_INT(ret)	i_debug("%s:%d end %s() -> %d", __FILE__, __LINE__. __FUNCTION__, ret)
 #endif

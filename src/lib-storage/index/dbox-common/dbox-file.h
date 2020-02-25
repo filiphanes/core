@@ -105,6 +105,8 @@ struct dbox_file {
 	const char *cur_path;
 	char *primary_path, *alt_path;
 	int fd;
+	struct fs_file *fs_file;
+	struct fs_lock *fs_lock;
 	struct istream *input;
 #ifdef DBOX_FILE_LOCK_METHOD_FLOCK
 	struct file_lock *lock;
@@ -131,7 +133,7 @@ struct dbox_file_append_context {
 	struct ostream *output;
 };
 
-#define dbox_file_is_open(file) ((file)->fd != -1)
+#define dbox_file_is_open(file) ((file)->fs_file != NULL)
 #define dbox_file_is_in_alt(file) ((file)->cur_path == (file)->alt_path)
 
 void dbox_file_init(struct dbox_file *file);

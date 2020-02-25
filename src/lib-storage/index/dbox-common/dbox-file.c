@@ -8,6 +8,7 @@
 #include "hostpid.h"
 #include "istream.h"
 #include "ostream.h"
+#include "fs-api.h"
 #include "file-lock.h"
 #include "file-dotlock.h"
 #include "mkdir-parents.h"
@@ -32,6 +33,7 @@ static const struct dotlock_settings dotlock_set = {
 
 const char *dbox_generate_tmp_filename(void)
 {
+	FUNC_START();
 	static unsigned int create_count = 0;
 
 	return t_strdup_printf(DBOX_TEMP_FILE_PREFIX"%"PRIdTIME_T".P%sQ%uM%u.%s",
@@ -43,6 +45,7 @@ const char *dbox_generate_tmp_filename(void)
 
 void dbox_file_set_syscall_error(struct dbox_file *file, const char *function)
 {
+	FUNC_START();
 	mail_storage_set_critical(&file->storage->storage,
 				  "%s failed for file %s: %m",
 				  function, file->cur_path);
@@ -50,6 +53,7 @@ void dbox_file_set_syscall_error(struct dbox_file *file, const char *function)
 
 void dbox_file_set_corrupted(struct dbox_file *file, const char *reason, ...)
 {
+	FUNC_START();
 	va_list args;
 
 	va_start(args, reason);
@@ -64,14 +68,16 @@ void dbox_file_set_corrupted(struct dbox_file *file, const char *reason, ...)
 
 void dbox_file_init(struct dbox_file *file)
 {
+	FUNC_START();
 	file->refcount = 1;
-	file->fd = -1;
+	file->fs_file = NULL;
 	file->cur_offset = (uoff_t)-1;
 	file->cur_path = file->primary_path;
 }
 
 void dbox_file_free(struct dbox_file *file)
 {
+	FUNC_START();
 	i_assert(file->refcount == 0);
 
 	pool_unref(&file->metadata_pool);
@@ -83,17 +89,19 @@ void dbox_file_free(struct dbox_file *file)
 
 void dbox_file_unref(struct dbox_file **_file)
 {
+	FUNC_START();
 	struct dbox_file *file = *_file;
 
 	*_file = NULL;
 
 	i_assert(file->refcount > 0);
 	if (--file->refcount == 0)
-		file->storage->v.file_unrefed(file);
+		file->storage->v.file_free(file);
 }
 
 static int dbox_file_parse_header(struct dbox_file *file, const char *line)
 {
+	FUNC_START();
 	const char *const *tmp, *value;
 	unsigned int pos;
 	enum dbox_header_key key;
@@ -143,6 +151,7 @@ static int dbox_file_parse_header(struct dbox_file *file, const char *line)
 
 static int dbox_file_read_header(struct dbox_file *file)
 {
+	FUNC_START();
 	const char *line;
 	unsigned int hdr_size;
 	int ret;
@@ -170,15 +179,16 @@ static int dbox_file_read_header(struct dbox_file *file)
 
 static int dbox_file_open_fd(struct dbox_file *file, bool try_altpath)
 {
+	FUNC_START();
 	const char *path;
-	int flags = O_RDWR;
+	int flags = FS_OPEN_MODE_APPEND;
 	bool alt = FALSE;
 
 	/* try the primary path first */
 	path = file->primary_path;
-	while ((file->fd = open(path, flags)) == -1) {
-		if (errno == EACCES && flags == O_RDWR) {
-			flags = O_RDONLY;
+	while ((file->fs_file = fs_file_init(file->storage->mail_fs, file->cur_path, flags | FS_OPEN_FLAG_SEEKABLE)) == NULL) {
+		if (errno == EACCES && flags == FS_OPEN_MODE_APPEND) {
+			flags = FS_OPEN_MODE_READONLY;
 			continue;
 		}
 		if (errno != ENOENT) {
@@ -203,13 +213,14 @@ static int dbox_file_open_fd(struct dbox_file *file, bool try_altpath)
 static int dbox_file_open_full(struct dbox_file *file, bool try_altpath,
 			       bool *notfound_r)
 {
-	int ret, fd;
+	FUNC_START();
+	int ret;
 
 	*notfound_r = FALSE;
 	if (file->input != NULL)
 		return 1;
 
-	if (file->fd == -1) {
+	if (file->fs_file == NULL) {
 		T_BEGIN {
 			ret = dbox_file_open_fd(file, try_altpath);
 		} T_END;
@@ -221,10 +232,7 @@ static int dbox_file_open_full(struct dbox_file *file, bool try_altpath,
 		}
 	}
 
-	/* we're manually checking at dbox_file_close() if we need to close the
-	   fd or not. */
-	fd = file->fd;
-	file->input = i_stream_create_fd_autoclose(&fd, DBOX_READ_BLOCK_SIZE);
+	file->input = fs_read_stream(file->fs_file, DBOX_READ_BLOCK_SIZE);
 	i_stream_set_name(file->input, file->cur_path);
 	i_stream_set_init_buffer_size(file->input, DBOX_READ_BLOCK_SIZE);
 	return dbox_file_read_header(file);
@@ -232,21 +240,24 @@ static int dbox_file_open_full(struct dbox_file *file, bool try_altpath,
 
 int dbox_file_open(struct dbox_file *file, bool *deleted_r)
 {
+	FUNC_START();
 	return dbox_file_open_full(file, TRUE, deleted_r);
 }
 
 int dbox_file_open_primary(struct dbox_file *file, bool *notfound_r)
 {
+	FUNC_START();
 	return dbox_file_open_full(file, FALSE, notfound_r);
 }
 
 int dbox_file_stat(struct dbox_file *file, struct stat *st_r)
 {
+	FUNC_START();
 	const char *path;
 	bool alt = FALSE;
 
 	if (dbox_file_is_open(file)) {
-		if (fstat(file->fd, st_r) < 0) {
+		if (fs_stat(file->fs_file, st_r) < 0) {
 			mail_storage_set_critical(&file->storage->storage,
 				"fstat(%s) failed: %m", file->cur_path);
 			return -1;
@@ -256,7 +267,9 @@ int dbox_file_stat(struct dbox_file *file, struct stat *st_r)
 
 	/* try the primary path first */
 	path = file->primary_path;
-	while (stat(path, st_r) < 0) {
+	file->fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_READONLY);
+	while (fs_stat(file->fs_file, st_r) < 0)
+	{
 		if (errno != ENOENT) {
 			mail_storage_set_critical(&file->storage->storage,
 						  "stat(%s) failed: %m", path);
@@ -270,14 +283,17 @@ int dbox_file_stat(struct dbox_file *file, struct stat *st_r)
 
 		/* try the alternative path */
 		path = file->alt_path;
+		file->fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_READONLY);
 		alt = TRUE;
 	}
+	fs_file_deinit(&file->fs_file);
 	file->cur_path = path;
 	return 0;
 }
 
 int dbox_file_header_write(struct dbox_file *file, struct ostream *output)
 {
+	FUNC_START();
 	string_t *hdr;
 
 	hdr = t_str_new(128);
@@ -294,61 +310,46 @@ int dbox_file_header_write(struct dbox_file *file, struct ostream *output)
 
 void dbox_file_close(struct dbox_file *file)
 {
+	FUNC_START();
 	dbox_file_unlock(file);
 	if (file->input != NULL) {
-		/* stream autocloses the fd when it gets destroyed. note that
-		   the stream may outlive the struct dbox_file. */
 		i_stream_unref(&file->input);
-		file->fd = -1;
-	} else if (file->fd != -1) {
-		if (close(file->fd) < 0)
-			dbox_file_set_syscall_error(file, "close()");
-		file->fd = -1;
 	}
+	fs_file_deinit(&file->fs_file);
 	file->cur_offset = (uoff_t)-1;
 }
 
 int dbox_file_try_lock(struct dbox_file *file)
 {
+	FUNC_START();
 	int ret;
 
-	i_assert(file->fd != -1);
+	i_assert(file->fs_file != NULL);
 
-#ifdef DBOX_FILE_LOCK_METHOD_FLOCK
-	ret = file_try_lock(file->fd, file->cur_path, F_WRLCK,
-			    FILE_LOCK_METHOD_FLOCK, &file->lock);
+	ret = fs_lock(file->fs_file, 10, &file->fs_lock);
 	if (ret < 0) {
 		mail_storage_set_critical(&file->storage->storage,
 			"file_try_lock(%s) failed: %m", file->cur_path);
 	}
-#else
-	ret = file_dotlock_create(&dotlock_set, file->cur_path,
-				  DOTLOCK_CREATE_FLAG_NONBLOCK, &file->lock);
-	if (ret < 0) {
-		mail_storage_set_critical(&file->storage->storage,
-			"file_dotlock_create(%s) failed: %m", file->cur_path);
-	}
-#endif
+
 	return ret;
 }
 
 void dbox_file_unlock(struct dbox_file *file)
 {
-	i_assert(!file->appending || file->lock == NULL);
+	FUNC_START();
+	i_assert(!file->appending || file->fs_lock == NULL);
 
-	if (file->lock != NULL) {
-#ifdef DBOX_FILE_LOCK_METHOD_FLOCK
-		file_unlock(&file->lock);
-#else
-		file_dotlock_delete(&file->lock);
-#endif
-	}
+	if (file->fs_lock != NULL)
+		fs_unlock(&file->fs_lock);
+
 	if (file->input != NULL)
 		i_stream_sync(file->input);
 }
 
 int dbox_file_read_mail_header(struct dbox_file *file, uoff_t *physical_size_r)
 {
+	FUNC_START();
 	struct dbox_message_header hdr;
 	const unsigned char *data;
 	size_t size;
@@ -386,6 +387,7 @@ int dbox_file_read_mail_header(struct dbox_file *file, uoff_t *physical_size_r)
 
 int dbox_file_seek(struct dbox_file *file, uoff_t offset)
 {
+	FUNC_START();
 	uoff_t size;
 	int ret;
 
@@ -409,6 +411,7 @@ int dbox_file_seek(struct dbox_file *file, uoff_t offset)
 static int
 dbox_file_seek_next_at_metadata(struct dbox_file *file, uoff_t *offset)
 {
+	FUNC_START();
 	const char *line;
 	size_t buf_size;
 	int ret;
@@ -433,11 +436,13 @@ dbox_file_seek_next_at_metadata(struct dbox_file *file, uoff_t *offset)
 
 void dbox_file_seek_rewind(struct dbox_file *file)
 {
+	FUNC_START();
 	file->cur_offset = (uoff_t)-1;
 }
 
 int dbox_file_seek_next(struct dbox_file *file, uoff_t *offset_r, bool *last_r)
 {
+	FUNC_START();
 	uoff_t offset;
 	int ret;
 
@@ -471,6 +476,7 @@ int dbox_file_seek_next(struct dbox_file *file, uoff_t *offset_r, bool *last_r)
 
 struct dbox_file_append_context *dbox_file_append_init(struct dbox_file *file)
 {
+	FUNC_START();
 	struct dbox_file_append_context *ctx;
 
 	i_assert(!file->appending);
@@ -479,17 +485,15 @@ struct dbox_file_append_context *dbox_file_append_init(struct dbox_file *file)
 
 	ctx = i_new(struct dbox_file_append_context, 1);
 	ctx->file = file;
-	if (file->fd != -1) {
-		ctx->output = o_stream_create_fd_file(file->fd, 0, FALSE);
-		o_stream_set_name(ctx->output, file->cur_path);
-		o_stream_set_finish_via_child(ctx->output, FALSE);
-		o_stream_cork(ctx->output);
+	if (file->fs_file != NULL) {
+		ctx->output = fs_write_stream(file->fs_file);
 	}
 	return ctx;
 }
 
 int dbox_file_append_commit(struct dbox_file_append_context **_ctx)
 {
+	FUNC_START();
 	struct dbox_file_append_context *ctx = *_ctx;
 	int ret;
 
@@ -497,15 +501,7 @@ int dbox_file_append_commit(struct dbox_file_append_context **_ctx)
 
 	*_ctx = NULL;
 
-	ret = dbox_file_append_flush(ctx);
-	if (ctx->last_checkpoint_offset != ctx->output->offset) {
-		o_stream_close(ctx->output);
-		if (ftruncate(ctx->file->fd, ctx->last_checkpoint_offset) < 0) {
-			dbox_file_set_syscall_error(ctx->file, "ftruncate()");
-			return -1;
-		}
-	}
-	o_stream_unref(&ctx->output);
+	ret = fs_write_stream_finish(ctx->file->fs_file, &ctx->output);
 	ctx->file->appending = FALSE;
 	i_free(ctx);
 	return ret;
@@ -513,6 +509,7 @@ int dbox_file_append_commit(struct dbox_file_append_context **_ctx)
 
 void dbox_file_append_rollback(struct dbox_file_append_context **_ctx)
 {
+	FUNC_START();
 	struct dbox_file_append_context *ctx = *_ctx;
 	struct dbox_file *file = ctx->file;
 	bool close_file = FALSE;
@@ -524,19 +521,11 @@ void dbox_file_append_rollback(struct dbox_file_append_context **_ctx)
 		/* nothing changed */
 	} else if (ctx->first_append_offset == file->file_header_size) {
 		/* rolling back everything */
-		if (unlink(file->cur_path) < 0)
-			dbox_file_set_syscall_error(file, "unlink()");
+		if (fs_delete(file->fs_file) < 0)
+			dbox_file_set_syscall_error(file, "fs_delete()");
 		close_file = TRUE;
-	} else {
-		/* truncating only some mails */
-		o_stream_close(ctx->output);
-		if (ftruncate(file->fd, ctx->first_append_offset) < 0)
-			dbox_file_set_syscall_error(file, "ftruncate()");
 	}
-	if (ctx->output != NULL) {
-		o_stream_abort(ctx->output);
-		o_stream_unref(&ctx->output);
-	}
+	fs_write_stream_abort_error(file->fs_file, &ctx->output, "rollback");
 	i_free(ctx);
 
 	if (close_file)
@@ -546,34 +535,38 @@ void dbox_file_append_rollback(struct dbox_file_append_context **_ctx)
 
 int dbox_file_append_flush(struct dbox_file_append_context *ctx)
 {
-	struct mail_storage *storage = &ctx->file->storage->storage;
-
+	FUNC_START();
 	if (ctx->last_flush_offset == ctx->output->offset &&
 	    ctx->last_checkpoint_offset == ctx->output->offset)
 		return 0;
 
-	if (o_stream_flush(ctx->output) < 0) {
-		dbox_file_set_syscall_error(ctx->file, "write()");
+	if (fs_write_stream_finish(ctx->file->fs_file, &ctx->output) < 0)
+	{
+		dbox_file_set_syscall_error(ctx->file, "fs_write_stream_finish()");
 		return -1;
 	}
 
 	if (ctx->last_checkpoint_offset != ctx->output->offset) {
+		/* TODO: is this needed with fs-api?
 		if (ftruncate(ctx->file->fd, ctx->last_checkpoint_offset) < 0) {
 			dbox_file_set_syscall_error(ctx->file, "ftruncate()");
 			return -1;
 		}
+		*/
 		if (o_stream_seek(ctx->output, ctx->last_checkpoint_offset) < 0) {
 			dbox_file_set_syscall_error(ctx->file, "lseek()");
 			return -1;
 		}
 	}
 
+	/* TODO: is this needed with fs-api?
 	if (storage->set->parsed_fsync_mode != FSYNC_MODE_NEVER) {
 		if (fdatasync(ctx->file->fd) < 0) {
 			dbox_file_set_syscall_error(ctx->file, "fdatasync()");
 			return -1;
 		}
 	}
+	*/
 	ctx->last_flush_offset = ctx->output->offset;
 	return 0;
 }
@@ -586,6 +579,7 @@ void dbox_file_append_checkpoint(struct dbox_file_append_context *ctx)
 int dbox_file_get_append_stream(struct dbox_file_append_context *ctx,
 				struct ostream **output_r)
 {
+	FUNC_START();
 	struct dbox_file *file = ctx->file;
 	struct stat st;
 
@@ -618,7 +612,7 @@ int dbox_file_get_append_stream(struct dbox_file_append_context *ctx,
 
 	if (ctx->output->offset == 0) {
 		/* first append to existing file. seek to eof first. */
-		if (fstat(file->fd, &st) < 0) {
+		if (fs_stat(file->fs_file, &st) < 0) {
 			dbox_file_set_syscall_error(file, "fstat()");
 			return -1;
 		}
@@ -638,6 +632,7 @@ int dbox_file_get_append_stream(struct dbox_file_append_context *ctx,
 
 int dbox_file_metadata_skip_header(struct dbox_file *file)
 {
+	FUNC_START();
 	struct dbox_metadata_header metadata_hdr;
 	const unsigned char *data;
 	size_t size;
@@ -670,6 +665,7 @@ int dbox_file_metadata_skip_header(struct dbox_file *file)
 static int
 dbox_file_metadata_read_at(struct dbox_file *file, uoff_t metadata_offset)
 {
+	FUNC_START();
 	const char *line;
 	size_t buf_size;
 	int ret;
@@ -707,6 +703,7 @@ dbox_file_metadata_read_at(struct dbox_file *file, uoff_t metadata_offset)
 
 int dbox_file_metadata_read(struct dbox_file *file)
 {
+	FUNC_START();
 	uoff_t metadata_offset;
 	int ret;
 
@@ -741,6 +738,7 @@ const char *dbox_file_metadata_get(struct dbox_file *file,
 
 uoff_t dbox_file_get_plaintext_size(struct dbox_file *file)
 {
+	FUNC_START();
 	const char *value;
 	uintmax_t size;
 
@@ -761,6 +759,7 @@ uoff_t dbox_file_get_plaintext_size(struct dbox_file *file)
 void dbox_msg_header_fill(struct dbox_message_header *dbox_msg_hdr,
 			  uoff_t message_size)
 {
+	FUNC_START();
 	memset(dbox_msg_hdr, ' ', sizeof(*dbox_msg_hdr));
 	memcpy(dbox_msg_hdr->magic_pre, DBOX_MAGIC_PRE,
 	       sizeof(dbox_msg_hdr->magic_pre));
@@ -772,14 +771,16 @@ void dbox_msg_header_fill(struct dbox_message_header *dbox_msg_hdr,
 
 int dbox_file_unlink(struct dbox_file *file)
 {
+	FUNC_START();
 	const char *path;
 	bool alt = FALSE;
 
 	path = file->primary_path;
-	while (unlink(path) < 0) {
+	// TODO: delete both file paths
+	while (fs_delete(file->fs_file) < 0) {
 		if (errno != ENOENT) {
 			mail_storage_set_critical(&file->storage->storage,
-				"unlink(%s) failed: %m", path);
+				"fs_delete(%s) failed: %m", path);
 			return -1;
 		}
 		if (file->alt_path == NULL || alt) {

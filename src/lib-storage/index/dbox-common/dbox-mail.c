@@ -17,6 +17,7 @@ dbox_mail_alloc(struct mailbox_transaction_context *t,
 		enum mail_fetch_field wanted_fields,
 		struct mailbox_header_lookup_ctx *wanted_headers)
 {
+	FUNC_START();
 	struct dbox_mail *mail;
 	pool_t pool;
 
@@ -30,6 +31,7 @@ dbox_mail_alloc(struct mailbox_transaction_context *t,
 
 void dbox_mail_close(struct mail *_mail)
 {
+	FUNC_START();
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 
 	index_mail_close(_mail);
@@ -41,6 +43,7 @@ void dbox_mail_close(struct mail *_mail)
 
 int dbox_mail_metadata_read(struct dbox_mail *mail, struct dbox_file **file_r)
 {
+	FUNC_START();
 	struct dbox_storage *storage =
 		DBOX_STORAGE(mail->imail.mail.mail.box->storage);
 	uoff_t offset;
@@ -65,6 +68,7 @@ static int
 dbox_mail_metadata_get(struct dbox_mail *mail, enum dbox_metadata_key key,
 		       const char **value_r)
 {
+	FUNC_START();
 	struct dbox_file *file;
 
 	if (dbox_mail_metadata_read(mail, &file) < 0)
@@ -76,6 +80,7 @@ dbox_mail_metadata_get(struct dbox_mail *mail, enum dbox_metadata_key key,
 
 int dbox_mail_get_physical_size(struct mail *_mail, uoff_t *size_r)
 {
+	FUNC_START();
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct index_mail_data *data = &mail->imail.data;
 	struct dbox_file *file;
@@ -93,6 +98,7 @@ int dbox_mail_get_physical_size(struct mail *_mail, uoff_t *size_r)
 
 int dbox_mail_get_virtual_size(struct mail *_mail, uoff_t *size_r)
 {
+	FUNC_START();
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct index_mail_data *data = &mail->imail.data;
 	const char *value;
@@ -116,6 +122,7 @@ int dbox_mail_get_virtual_size(struct mail *_mail, uoff_t *size_r)
 
 int dbox_mail_get_received_date(struct mail *_mail, time_t *date_r)
 {
+	FUNC_START();
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct index_mail_data *data = &mail->imail.data;
 	const char *value;
@@ -139,6 +146,7 @@ int dbox_mail_get_received_date(struct mail *_mail, time_t *date_r)
 
 int dbox_mail_get_save_date(struct mail *_mail, time_t *date_r)
 {
+	FUNC_START();
 	struct dbox_storage *storage = DBOX_STORAGE(_mail->box->storage);
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct index_mail_data *data = &mail->imail.data;
@@ -167,6 +175,7 @@ dbox_get_cached_metadata(struct dbox_mail *mail, enum dbox_metadata_key key,
 			 enum index_cache_field cache_field,
 			 const char **value_r)
 {
+	FUNC_START();
 	struct index_mail *imail = &mail->imail;
 	struct index_mailbox_context *ibox =
 		INDEX_STORAGE_CONTEXT(imail->mail.mail.box);
@@ -222,6 +231,7 @@ dbox_get_cached_metadata(struct dbox_mail *mail, enum dbox_metadata_key key,
 int dbox_mail_get_special(struct mail *_mail, enum mail_fetch_field field,
 			  const char **value_r)
 {
+	FUNC_START();
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	int ret;
 
@@ -264,6 +274,7 @@ static int
 get_mail_stream(struct dbox_mail *mail, uoff_t offset,
 		struct istream **stream_r)
 {
+	FUNC_START();
 	struct mail_private *pmail = &mail->imail.mail;
 	struct dbox_file *file = mail->open_file;
 	int ret;
@@ -289,6 +300,7 @@ int dbox_mail_get_stream(struct mail *_mail, bool get_body ATTR_UNUSED,
 			 struct message_size *body_size,
 			 struct istream **stream_r)
 {
+	FUNC_START();
 	struct dbox_storage *storage = DBOX_STORAGE(_mail->box->storage);
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct index_mail_data *data = &mail->imail.data;

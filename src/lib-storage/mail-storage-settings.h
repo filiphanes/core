@@ -14,6 +14,7 @@ struct smtp_address;
 
 struct mail_storage_settings {
 	const char *mail_location;
+	const char *mail_fs;
 	const char *mail_attachment_fs;
 	const char *mail_attachment_dir;
 	const char *mail_attachment_hash;

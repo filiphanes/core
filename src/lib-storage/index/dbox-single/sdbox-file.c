@@ -17,6 +17,7 @@
 
 static void sdbox_file_init_paths(struct sdbox_file *file, const char *fname)
 {
+	FUNC_START();
 	struct mailbox *box = &file->mbox->box;
 	const char *alt_path;
 
@@ -33,6 +34,7 @@ static void sdbox_file_init_paths(struct sdbox_file *file, const char *fname)
 
 struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, uint32_t uid)
 {
+	FUNC_START();
 	struct sdbox_file *file;
 	const char *fname;
 
@@ -54,16 +56,18 @@ struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, uint32_t uid)
 
 struct dbox_file *sdbox_file_create(struct sdbox_mailbox *mbox)
 {
+	FUNC_START();
 	struct dbox_file *file;
 
 	file = sdbox_file_init(mbox, 0);
-	file->fd = file->storage->v.
-		file_create_fd(file, file->primary_path, FALSE);
+	file->fs_file = file->storage->v.
+		file_init_fs_file(file, file->primary_path, FALSE);
 	return file;
 }
 
 void sdbox_file_free(struct dbox_file *file)
 {
+	FUNC_START();
 	struct sdbox_file *sfile = (struct sdbox_file *)file;
 
 	pool_unref(&sfile->attachment_pool);
@@ -72,6 +76,7 @@ void sdbox_file_free(struct dbox_file *file)
 
 int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
 {
+	FUNC_START();
 	const char *line;
 	bool deleted;
 	int ret;
@@ -105,6 +110,7 @@ int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
 const char *
 sdbox_file_attachment_relpath(struct sdbox_file *file, const char *srcpath)
 {
+	FUNC_START();
 	const char *p;
 
 	p = strchr(srcpath, '-');
@@ -122,6 +128,7 @@ sdbox_file_attachment_relpath(struct sdbox_file *file, const char *srcpath)
 
 static int sdbox_file_rename_attachments(struct sdbox_file *file)
 {
+	FUNC_START();
 	struct dbox_storage *storage = file->file.storage;
 	struct fs_file *src_file, *dest_file;
 	const char *const *pathp, *src, *dest;
@@ -149,6 +156,7 @@ static int sdbox_file_rename_attachments(struct sdbox_file *file)
 int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 			  bool ignore_if_exists)
 {
+	FUNC_START();
 	const char *p, *old_path, *dir, *new_fname, *new_path;
 	struct stat st;
 
@@ -187,6 +195,7 @@ int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 
 static int sdbox_file_unlink_aborted_save_attachments(struct sdbox_file *file)
 {
+	FUNC_START();
 	struct dbox_storage *storage = file->file.storage;
 	struct fs *fs = storage->attachment_fs;
 	struct fs_file *fs_file;
@@ -225,6 +234,7 @@ static int sdbox_file_unlink_aborted_save_attachments(struct sdbox_file *file)
 
 int sdbox_file_unlink_aborted_save(struct sdbox_file *file)
 {
+	FUNC_START();
 	int ret = 0;
 
 	if (unlink(file->file.cur_path) < 0) {
@@ -239,63 +249,36 @@ int sdbox_file_unlink_aborted_save(struct sdbox_file *file)
 	return ret;
 }
 
-int sdbox_file_create_fd(struct dbox_file *file, const char *path, bool parents)
+struct fs_file *sdbox_file_init_fs_file(struct dbox_file *file, const char *path, bool parents)
 {
+	FUNC_START();
 	struct sdbox_file *sfile = (struct sdbox_file *)file;
 	struct mailbox *box = &sfile->mbox->box;
 	const struct mailbox_permissions *perm = mailbox_get_permissions(box);
 	const char *p, *dir;
 	mode_t old_mask;
-	int fd;
+	struct fs_file *fs_file;
 
 	old_mask = umask(0666 & ~perm->file_create_mode);
-	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+	fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_REPLACE);
 	umask(old_mask);
-	if (fd == -1 && errno == ENOENT && parents &&
-	    (p = strrchr(path, '/')) != NULL) {
-		dir = t_strdup_until(path, p);
-		if (mkdir_parents_chgrp(dir, perm->dir_create_mode,
-					perm->file_create_gid,
-					perm->file_create_gid_origin) < 0 &&
-		   errno != EEXIST) {
-			mailbox_set_critical(box,
-				"mkdir_parents(%s) failed: %m", dir);
-			return -1;
-		}
-		/* try again */
-		old_mask = umask(0666 & ~perm->file_create_mode);
-		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
-		umask(old_mask);
+	if (fs_file == NULL) {
+		mailbox_set_critical(box, "fs_file_init(%s, FS_OPEN_MODE_REPLACE) failed: %m", path);
 	}
-	if (fd == -1) {
-		mailbox_set_critical(box, "open(%s, O_CREAT) failed: %m", path);
-	} else if (perm->file_create_gid == (gid_t)-1) {
-		/* no group change */
-	} else if (fchown(fd, (uid_t)-1, perm->file_create_gid) < 0) {
-		if (errno == EPERM) {
-			mailbox_set_critical(box, "%s",
-				eperm_error_get_chgrp("fchown", path,
-					perm->file_create_gid,
-					perm->file_create_gid_origin));
-		} else {
-			mailbox_set_critical(box,
-				"fchown(%s, -1, %ld) failed: %m",
-				path, (long)perm->file_create_gid);
-		}
-		/* continue anyway */
-	}
-	return fd;
+	return fs_file;
 }
 
 int sdbox_file_move(struct dbox_file *file, bool alt_path)
 {
+	FUNC_START();
 	struct mail_storage *storage = &file->storage->storage;
 	struct ostream *output;
 	const char *dest_dir, *temp_path, *dest_path, *p;
 	struct stat st;
-	struct utimbuf ut;
 	bool deleted;
-	int out_fd, ret = 0;
+	struct fs_file *out_file;
+	struct fs_file *dest_file;
+	int ret = 0;
 
 	i_assert(file->input != NULL);
 
@@ -321,68 +304,22 @@ int sdbox_file_move(struct dbox_file *file, bool alt_path)
 
 	/* first copy the file. make sure to catch every possible error
 	   since we really don't want to break the file. */
-	out_fd = file->storage->v.file_create_fd(file, temp_path, TRUE);
-	if (out_fd == -1)
+	out_file = file->storage->v.file_init_fs_file(file, dest_path, TRUE);
+	if (out_file == NULL)
 		return -1;
 
-	output = o_stream_create_fd_file(out_fd, 0, FALSE);
+	output = fs_write_stream(out_file);
 	i_stream_seek(file->input, 0);
 	o_stream_nsend_istream(output, file->input);
-	if (o_stream_finish(output) < 0) {
+	if (fs_write_stream_finish(file->fs_file, &output) < 0) {
 		mail_storage_set_critical(storage, "write(%s) failed: %s",
 			temp_path, o_stream_get_error(output));
 		ret = -1;
 	}
-	o_stream_unref(&output);
 
-	if (storage->set->parsed_fsync_mode != FSYNC_MODE_NEVER && ret == 0) {
-		if (fsync(out_fd) < 0) {
-			mail_storage_set_critical(storage,
-				"fsync(%s) failed: %m", temp_path);
-			ret = -1;
-		}
-	}
-	if (close(out_fd) < 0) {
-		mail_storage_set_critical(storage,
-			"close(%s) failed: %m", temp_path);
-		ret = -1;
-	}
-	if (ret < 0) {
-		i_unlink(temp_path);
-		return -1;
-	}
-	/* preserve the original atime/mtime. this isn't necessary for Dovecot,
-	   but could be useful for external reasons. */
-	ut.actime = st.st_atime;
-	ut.modtime = st.st_mtime;
-	if (utime(temp_path, &ut) < 0) {
-		mail_storage_set_critical(storage,
-			"utime(%s) failed: %m", temp_path);
-	}
-
-	/* the temp file was successfully written. rename it now to the
-	   destination file. the destination shouldn't exist, but if it does
-	   its contents should be the same (except for maybe older metadata) */
-	if (rename(temp_path, dest_path) < 0) {
-		mail_storage_set_critical(storage,
-			"rename(%s, %s) failed: %m", temp_path, dest_path);
-		i_unlink_if_exists(temp_path);
-		return -1;
-	}
-	if (storage->set->parsed_fsync_mode != FSYNC_MODE_NEVER) {
-		if (fdatasync_path(dest_dir) < 0) {
-			mail_storage_set_critical(storage,
-				"fdatasync(%s) failed: %m", dest_dir);
-			i_unlink(dest_path);
-			return -1;
-		}
-	}
-	if (unlink(file->cur_path) < 0) {
-		dbox_file_set_syscall_error(file, "unlink()");
-		if (errno == EACCES) {
-			/* configuration problem? revert the write */
-			i_unlink(dest_path);
-		}
+	fs_file_deinit(&dest_file);
+	if (fs_delete(file->fs_file) < 0) {
+		dbox_file_set_syscall_error(file, "fs_delete()");
 		/* who knows what happened to the file. keep both just to be
 		   sure both won't get deleted. */
 		return -1;
@@ -402,6 +339,7 @@ static int
 sdbox_unlink_attachments(struct sdbox_file *sfile,
 			 const ARRAY_TYPE(mail_attachment_extref) *extrefs)
 {
+	FUNC_START();
 	struct dbox_storage *storage = sfile->file.storage;
 	const struct mail_attachment_extref *extref;
 	const char *path;
@@ -418,6 +356,7 @@ sdbox_unlink_attachments(struct sdbox_file *sfile,
 
 int sdbox_file_unlink_with_attachments(struct sdbox_file *sfile)
 {
+	FUNC_START();
 	ARRAY_TYPE(mail_attachment_extref) extrefs;
 	const char *extrefs_line;
 	pool_t pool;
