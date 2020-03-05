@@ -97,6 +97,8 @@ sdbox_copy_hardlink(struct mail_save_context *_ctx, struct mail *mail)
 	struct sdbox_mailbox *src_mbox;
 	struct dbox_file *src_file, *dest_file;
 	const char *src_path, *dest_path;
+	guid_128_t guid;
+	const void *guid_data;
 	int ret;
 
 	if (strcmp(mail->box->storage->name, SDBOX_STORAGE_NAME) == 0)
@@ -106,11 +108,17 @@ sdbox_copy_hardlink(struct mail_save_context *_ctx, struct mail *mail)
 		return 0;
 	}
 
-	src_file = sdbox_file_init(src_mbox, mail->uid);
-	dest_file = sdbox_file_init(dest_mbox, 0);
+	mail_index_lookup_ext(mail->transaction->view, mail->seq,
+				src_mbox->guid_ext_id, &guid_data, NULL);
+	src_file = sdbox_file_init(src_mbox, guid_data);
+
+	// TODO: detect if other guid if data.guid is empty, then use old guid
+	_ctx->data.guid = i_memdup(guid_data, GUID_128_SIZE);
+	dest_file = sdbox_file_init(dest_mbox, guid_data);
 
 	ctx->ctx.data.flags &= ~DBOX_INDEX_FLAG_ALT;
 
+	// TODO: use fs_copy
 	src_path = src_file->primary_path;
 	dest_path = dest_file->primary_path;
 	ret = nfs_safe_link(src_path, dest_path, FALSE);

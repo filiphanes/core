@@ -9,6 +9,7 @@ struct sdbox_file {
 
 	/* 0 while file is being created */
 	uint32_t uid;
+	guid_128_t guid;
 
 	/* list of attachment paths while saving/copying message */
 	pool_t attachment_pool;
@@ -16,8 +17,8 @@ struct sdbox_file {
 	bool written_to_disk;
 };
 
-struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, uint32_t uid);
-struct dbox_file *sdbox_file_create(struct sdbox_mailbox *mbox);
+char *sdbox_file_make_path(struct sdbox_file *file, const char *fname);
+struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, guid_128_t guid);
 void sdbox_file_free(struct dbox_file *file);
 
 /* Get file's extrefs metadata. */
@@ -28,9 +29,10 @@ int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r);
 const char *
 sdbox_file_attachment_relpath(struct sdbox_file *file, const char *srcpath);
 
-/* Assign UID for a newly created file (by renaming it) */
+/* Assign UID for a newly created file (by renaming it) 
 int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 			  bool ignore_if_exists);
+*/
 
 struct fs_file *sdbox_file_init_fs_file(struct dbox_file *file, const char *path,
 			 bool parents);

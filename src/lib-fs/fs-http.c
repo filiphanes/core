@@ -20,6 +20,20 @@
 #define MAX_MKDIR_RETRY_COUNT 5
 #define FS_HTTP_META_PREFIX "X-Meta-"
 
+#ifdef NDEBUG
+#define FUNC_START() ((void)0)
+#define FUNC_IN() ((void)0)
+#define FUNC_END() ((void)0)
+#define FUNC_END_RET(ignore) ((void)0)
+#define FUNC_END_RET_INT(ignore) ((void)0)
+#else
+#define FUNC_START()			i_debug("%s:%d %s() start", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_IN()				i_debug("%s:%d %s() in", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END()				i_debug("%s:%d %s() end", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END_RET(ret)		i_debug("%s:%d %s() return %s", __FILE__, __LINE__, __FUNCTION__, ret)
+#define FUNC_END_RET_INT(ret)	i_debug("%s:%d %s() return %d", __FILE__, __LINE__. __FUNCTION__, ret)
+#endif
+
 struct http_client *fs_http_client = NULL;
 
 struct http_fs {
@@ -55,6 +69,7 @@ struct http_fs_iter {
 
 static struct fs *fs_http_alloc(void)
 {
+	FUNC_START();
 	struct http_fs *fs;
 
 	fs = i_new(struct http_fs, 1);
@@ -66,6 +81,7 @@ static int
 fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	      const char **error_r)
 {
+	FUNC_START();
 	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
 	struct http_client_settings http_set;
 	const char *error;
@@ -81,18 +97,21 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 					" '%s': %s", args, error);
 		return -1;
 	}
-	i_debug("fs_http: url=%s, enc_query=%s", args, fs->url->enc_query);
+	i_debug("fs_http: url=%s", args);
 
 	tmp = t_strsplit_spaces(fs->url->enc_query, "&");
 	for (; *tmp != NULL; tmp++) {
 		const char *arg = *tmp;
 		if (str_begins(arg, "rawlog_dir=")) {
 			rawlog_dir = i_strdup(arg + 11);
+			i_debug("fs_http: rawlog_dir=%s", rawlog_dir);
 		} else if (strcmp(arg, "debug=yes") == 0) {
 			debug = TRUE;
+			i_debug("fs_http: debug=yes");
 		} else if (str_begins(arg, "prefix=")) {
 			i_free(fs->path_prefix);
 			fs->path_prefix = i_strdup(arg + 7);
+			i_debug("fs_http: prefix=%s", fs->path_prefix);
 		}
 	}
 
@@ -117,6 +136,7 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 
 static void fs_http_deinit(struct fs *_fs)
 {
+	FUNC_START();
 	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
 
 	i_free(fs->path_prefix);
@@ -128,6 +148,7 @@ static void fs_http_deinit(struct fs *_fs)
 
 static enum fs_properties fs_http_get_properties(struct fs *_fs)
 {
+	FUNC_START();
 	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
 	enum fs_properties props =
 		FS_PROPERTY_LOCKS | FS_PROPERTY_FASTCOPY | FS_PROPERTY_RENAME |
@@ -145,6 +166,7 @@ static enum fs_properties fs_http_get_properties(struct fs *_fs)
 
 static struct fs_file *fs_http_file_alloc(void)
 {
+	FUNC_START();
 	struct http_fs_file *file;
 	pool_t pool;
 
@@ -158,6 +180,7 @@ static void
 fs_http_file_init(struct fs_file *_file, const char *path,
 		   enum fs_open_mode mode, enum fs_open_flags flags)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	struct http_fs *fs = container_of(_file->fs, struct http_fs, fs);
@@ -186,20 +209,23 @@ fs_http_file_init(struct fs_file *_file, const char *path,
 
 static void fs_http_file_deinit(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 
 	i_assert(_file->output == NULL);
 
 	fs_file_free(_file);
-	i_free(file->file.path);
+	FUNC_IN();
 	pool_unref(&file->pool);
+	FUNC_END();
 }
 
 static void
 fs_http_set_async_callback(struct fs_file *_file,
 		fs_file_async_callback_t *callback, void *context)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	file->callback = callback;
@@ -209,26 +235,36 @@ fs_http_set_async_callback(struct fs_file *_file,
 static void
 fs_http_wait_async(struct fs *_fs ATTR_UNUSED)
 {
+	FUNC_START();
 	http_client_wait(fs_http_client);
 }
 
 static void
 fs_http_add_dovecot_headers(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
+	const char *val = NULL;
 
 	http_client_request_add_header(file->request, "X-Dovecot-Username",
 			_file->fs->username);
 	http_client_request_add_header(file->request, "X-Dovecot-Session-Id",
 			_file->fs->session_id);
-	http_client_request_add_header(file->request, "X-Dovecot-Object-Id",
-			fs_metadata_find(&_file->metadata, FS_METADATA_OBJECTID));
+
+	if (fs_lookup_metadata(_file, FS_METADATA_OBJECTID, &val) >= 0) {
+		if (val != NULL) {
+			http_client_request_add_header(file->request, "X-Dovecot-Object-Id", val);
+		}
+	} else if (errno == ENOTSUP) {
+		i_debug("Metadata not supported!");
+	} // TODO: else if (errno == EAGAIN){
 }
 
 static void
 fs_http_add_metadata_headers(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	const struct fs_metadata *metadata;
@@ -252,19 +288,23 @@ static void
 fs_http_response_callback(const struct http_response *response,
 		    		 struct http_fs_file *file)
 {
-	const struct http_header_field *field;
-	const ARRAY_TYPE(http_header_field) * header_fields;
+	FUNC_START();
+	// const struct http_header_field *field;
+	// const ARRAY_TYPE(http_header_field) *header_fields;
 	const unsigned char *data;
 	size_t size;
 
 	file->response_status = response->status;
 	if (response->status / 100 != 2) {
-		i_error("HTTP Request failed: %s", response->reason);
+		i_error("HTTP Response status: %u %s", response->status, response->reason);
 		return;
 	}
 
-	// Read metadata adn st_size
+	/*
+	FUNC_IN();
+	// Read metadata and st_size
 	header_fields = http_response_header_get_fields(response);
+	FUNC_IN();
 	array_foreach(header_fields, field) {
 		if (str_begins(field->name, FS_HTTP_META_PREFIX)) {
 			fs_default_set_metadata(&file->file,
@@ -276,8 +316,11 @@ fs_http_response_callback(const struct http_response *response,
 			}
 		}
 	}
+	*/
+	FUNC_IN();
 
 	str_truncate(file->response_data, 0);
+	FUNC_IN();
 
 	if (response->payload == NULL) {
 		return;
@@ -289,14 +332,17 @@ fs_http_response_callback(const struct http_response *response,
 		i_stream_skip(response->payload, size);
 	}
 	// TODO: set Object ID from PUT response headers or json
+	FUNC_IN();
 
 	if (file->callback != NULL) {
 		file->callback(file->callback_ctx);
 	}
+	FUNC_END();
 }
 
 static int fs_http_open_for_read(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 
@@ -317,45 +363,63 @@ static int fs_http_open_for_read(struct fs_file *_file)
 
 static bool fs_http_prefetch(struct fs_file *_file, uoff_t length ATTR_UNUSED)
 {
+	FUNC_START();
 	return fs_http_open_for_read(_file) < 0;
 }
 
 static struct istream *
 fs_http_read_stream(struct fs_file *_file, size_t max_buffer_size)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 
-	if (fs_http_open_for_read(_file) < 0)
-		file->i_payload = i_stream_create_error_str(errno, "%s", fs_file_last_error(_file));
-	else
-		file->i_payload = i_stream_create_from_buffer(file->response_data);
-	i_stream_set_max_buffer_size(file->i_payload, max_buffer_size);
+	fs_http_open_for_read(_file);
+	// TODO: return non-blocking stream from http response
+	http_client_wait(fs_http_client);
 
+	if (file->response_status / 100 == 2) {
+		file->i_payload = i_stream_create_from_buffer(file->response_data);
+	} else {
+		file->i_payload = i_stream_create_error_str(errno, "%s",
+								fs_file_last_error(_file));
+	}
+
+	i_stream_set_max_buffer_size(file->i_payload, max_buffer_size);
 	i_stream_set_name(file->i_payload, file->url->path);
 	return file->i_payload;
 }
 
 static void fs_http_write_rename_if_needed(struct http_fs_file *file)
 {
-	struct http_fs *fs = container_of(file->file.fs, struct http_fs, fs);
+	FUNC_START();
+	struct fs_file *_file = &file->file;
+	struct http_fs *fs = container_of(_file->fs, struct http_fs, fs);
 	const char *new_fname;
 
-	new_fname = fs_metadata_find(&file->file.metadata, FS_METADATA_WRITE_FNAME);
+	if (fs_lookup_metadata(_file, FS_METADATA_WRITE_FNAME, &new_fname) < 0) {
+		if (errno == ENOTSUP)
+			i_debug("Metadata not supported.");
+	}
+	FUNC_IN();
 	if (new_fname == NULL)
 		return;
+	FUNC_IN();
 
-	i_free(file->file.path);
-	file->file.path = i_strdup(new_fname);
+	p_free(file->pool, _file->path);
+	_file->path = p_strdup(file->pool, new_fname);
+	FUNC_IN();
 
 	p_free(file->pool, file->url->path);
 	file->url->path = fs->path_prefix == NULL ?
-		p_strdup(file->pool, file->file.path) :
-		p_strconcat(file->pool, fs->path_prefix, file->file.path, NULL);
+		p_strdup(file->pool, _file->path) :
+		p_strconcat(file->pool, fs->path_prefix, _file->path, NULL);
+	FUNC_END();
 }
 
 static void fs_http_write_stream(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 
@@ -371,6 +435,7 @@ static void fs_http_write_stream(struct fs_file *_file)
 
 static int fs_http_write_stream_finish(struct fs_file *_file, bool success)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	int ret = success ? 0 : -1;
@@ -417,6 +482,7 @@ static int fs_http_write_stream_finish(struct fs_file *_file, bool success)
 
 static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	int ret = 0;
@@ -454,6 +520,7 @@ static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 
 static int fs_http_delete(struct fs_file *_file)
 {
+	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 
@@ -485,6 +552,7 @@ static int fs_http_delete(struct fs_file *_file)
 
 static struct fs_iter *fs_http_iter_alloc(void)
 {
+	FUNC_START();
 	struct http_fs_iter *iter = i_new(struct http_fs_iter, 1);
 	return &iter->iter;
 }
@@ -493,6 +561,7 @@ static void
 fs_http_iter_init(struct fs_iter *_iter, const char *path,
 		   enum fs_iter_flags flags ATTR_UNUSED)
 {
+	FUNC_START();
 	struct http_fs_iter *iter =
 		container_of(_iter, struct http_fs_iter, iter);
 
@@ -511,6 +580,7 @@ fs_http_iter_init(struct fs_iter *_iter, const char *path,
 
 static bool fs_http_iter_want(struct http_fs_iter *iter, const char *fname)
 {
+	FUNC_START();
 	bool ret;
 
 	T_BEGIN {
@@ -530,6 +600,7 @@ static bool fs_http_iter_want(struct http_fs_iter *iter, const char *fname)
 
 static const char *fs_http_iter_next(struct fs_iter *_iter)
 {
+	FUNC_START();
 	struct http_fs_iter *iter =
 		container_of(_iter, struct http_fs_iter, iter);
 	struct dirent *d;
@@ -555,6 +626,7 @@ static const char *fs_http_iter_next(struct fs_iter *_iter)
 
 static int fs_http_iter_deinit(struct fs_iter *_iter)
 {
+	FUNC_START();
 	struct http_fs_iter *iter =
 		container_of(_iter, struct http_fs_iter, iter);
 	int ret = 0;
@@ -587,7 +659,7 @@ const struct fs fs_class_http = {
 		fs_http_set_async_callback,
 		fs_http_wait_async,
 		fs_default_set_metadata,
-		NULL,
+		NULL /* get_metadata */,
 		fs_http_prefetch,
 		NULL /* read */,
 		fs_http_read_stream,

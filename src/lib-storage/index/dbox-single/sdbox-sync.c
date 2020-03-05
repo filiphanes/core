@@ -36,7 +36,7 @@ static void sdbox_sync_file(struct sdbox_sync_context *ctx,
 			    uint32_t seq, uint32_t uid,
 			    enum sdbox_sync_entry_type type)
 {
-	struct dbox_file *file;
+	// struct dbox_file *file;
 	enum modify_type modify_type;
 
 	switch (type) {
@@ -51,6 +51,7 @@ static void sdbox_sync_file(struct sdbox_sync_context *ctx,
 		/* update flags in the sync transaction, mainly to make
 		   sure that these alt changes get marked as synced
 		   and won't be retried */
+	/* TODO: don't use alt storage
 		modify_type = type == SDBOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT ?
 			MODIFY_ADD : MODIFY_REMOVE;
 		mail_index_update_flags(ctx->trans, seq, modify_type,
@@ -58,6 +59,7 @@ static void sdbox_sync_file(struct sdbox_sync_context *ctx,
 		file = sdbox_file_init(ctx->mbox, uid);
 		dbox_sync_file_move_if_needed(file, type);
 		dbox_file_unref(&file);
+	*/
 		break;
 	}
 }
@@ -138,9 +140,15 @@ static void dbox_sync_file_expunge(struct sdbox_sync_context *ctx,
 	struct mailbox *box = &ctx->mbox->box;
 	struct dbox_file *file;
 	struct sdbox_file *sfile;
+	const void *guid;
+	uint32_t seq;
 	int ret;
 
-	file = sdbox_file_init(ctx->mbox, uid);
+	mail_index_lookup_seq(ctx->sync_view, uid, &seq);
+	mail_index_lookup_ext(ctx->sync_view, seq,
+						  ctx->mbox->guid_ext_id, &guid, NULL);
+
+	file = sdbox_file_init(ctx->mbox, guid);
 	sfile = (struct sdbox_file *)file;
 	if (file->storage->attachment_dir != NULL)
 		ret = sdbox_file_unlink_with_attachments(sfile);

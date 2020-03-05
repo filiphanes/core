@@ -88,12 +88,14 @@ bool dbox_header_have_flag(struct mailbox *box, uint32_t ext_id,
 
 #ifdef NDEBUG
 #define FUNC_START() ((void)0)
+#define FUNC_IN() ((void)0)
 #define FUNC_END() ((void)0)
 #define FUNC_END_RET(ignore) ((void)0)
 #define FUNC_END_RET_INT(ignore) ((void)0)
 #else
-#define FUNC_START()			i_debug("%s:%d start %s()", __FILE__, __LINE__, __FUNCTION__)
-#define FUNC_END()				i_debug("%s:%d end %s()", __FILE__, __LINE__, __FUNCTION__)
-#define FUNC_END_RET(ret)		i_debug("%s:%d end %s() -> %s", __FILE__, __LINE__, __FUNCTION__, ret)
-#define FUNC_END_RET_INT(ret)	i_debug("%s:%d end %s() -> %d", __FILE__, __LINE__. __FUNCTION__, ret)
+#define FUNC_START()			i_debug("%s:%d %s() start", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_IN()				i_debug("%s:%d %s() in", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END()				i_debug("%s:%d %s() end", __FILE__, __LINE__, __FUNCTION__)
+#define FUNC_END_RET(ret)		i_debug("%s:%d %s() return %s", __FILE__, __LINE__, __FUNCTION__, ret)
+#define FUNC_END_RET_INT(ret)	i_debug("%s:%d %s() return %d", __FILE__, __LINE__. __FUNCTION__, ret)
 #endif

@@ -53,10 +53,6 @@ int dbox_attachment_file_get_stream(struct dbox_file *file,
 	const char *ext_refs, *error;
 	int ret;
 
-	/* need to read metadata in case there are external references */
-	if ((ret = dbox_file_metadata_read(file)) <= 0)
-		return ret;
-
 	i_stream_seek(file->input, file->cur_offset + file->msg_header_size);
 
 	ext_refs = dbox_file_metadata_get(file, DBOX_METADATA_EXT_REF);

@@ -8,6 +8,7 @@
 #include "ostream.h"
 #include "str.h"
 #include "fs-api.h"
+#include "fs-api-private.h"
 #include "dbox-attachment.h"
 #include "sdbox-storage.h"
 #include "sdbox-file.h"
@@ -15,24 +16,16 @@
 #include <stdio.h>
 #include <utime.h>
 
-static void sdbox_file_init_paths(struct sdbox_file *file, const char *fname)
+char *sdbox_file_make_path(struct sdbox_file *file, const char *fname)
 {
 	FUNC_START();
-	struct mailbox *box = &file->mbox->box;
-	const char *alt_path;
-
-	i_free(file->file.primary_path);
-	i_free(file->file.alt_path);
-	file->file.primary_path =
-		i_strdup_printf("%s/%s", mailbox_get_path(box), fname);
-	file->file.cur_path = file->file.primary_path;
-
-	if (mailbox_get_path_to(box, MAILBOX_LIST_PATH_TYPE_ALT_MAILBOX,
-				&alt_path) > 0)
-		file->file.alt_path = i_strdup_printf("%s/%s", alt_path, fname);
+	return i_strdup_printf("/%s/%s/%s",
+		file->mbox->box.storage->user->username,
+		guid_128_to_string(file->mbox->mailbox_guid),
+		fname);
 }
 
-struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, uint32_t uid)
+struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, guid_128_t guid)
 {
 	FUNC_START();
 	struct sdbox_file *file;
@@ -42,27 +35,26 @@ struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, uint32_t uid)
 	file->file.storage = &mbox->storage->storage;
 	file->mbox = mbox;
 	T_BEGIN {
-		if (uid != 0) {
-			fname = t_strdup_printf(SDBOX_MAIL_FILE_FORMAT, uid);
-			sdbox_file_init_paths(file, fname);
-			file->uid = uid;
+		if (guid_128_is_empty(guid)) {
+			guid_128_generate(file->guid);
+			i_debug("sdbox_file_init: guid was empty, generated %s",
+					guid_128_to_string(file->guid));
 		} else {
-			sdbox_file_init_paths(file, dbox_generate_tmp_filename());
+			// we will generate guid later in sdbox_save_mail_write_metadata
+			guid_128_copy(file->guid, guid);
+			i_debug("sdbox_file_init: using guid %s copied to %s",
+					guid_128_to_string(guid),
+					guid_128_to_string(file->guid));
 		}
+
+		fname = guid_128_to_string(file->guid);
+		i_free(file->file.primary_path);
+		file->file.cur_path =
+			file->file.primary_path =
+				sdbox_file_make_path(file, fname);
 	} T_END;
 	dbox_file_init(&file->file);
 	return &file->file;
-}
-
-struct dbox_file *sdbox_file_create(struct sdbox_mailbox *mbox)
-{
-	FUNC_START();
-	struct dbox_file *file;
-
-	file = sdbox_file_init(mbox, 0);
-	file->fs_file = file->storage->v.
-		file_init_fs_file(file, file->primary_path, FALSE);
-	return file;
 }
 
 void sdbox_file_free(struct dbox_file *file)
@@ -88,8 +80,6 @@ int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
 	if (ret > 0) {
 		if (deleted)
 			return 0;
-		if ((ret = dbox_file_seek(file, 0)) > 0)
-			ret = dbox_file_metadata_read(file);
 	}
 	if (ret <= 0) {
 		if (ret < 0)
@@ -153,37 +143,46 @@ static int sdbox_file_rename_attachments(struct sdbox_file *file)
 	return ret;
 }
 
+/*
 int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 			  bool ignore_if_exists)
 {
 	FUNC_START();
-	const char *p, *old_path, *dir, *new_fname, *new_path;
-	struct stat st;
-
+	struct dbox_file *_file = &file->file;
+	struct fs_file *old_file;
+	struct fs_file *new_file;
 	i_assert(file->uid == 0);
 	i_assert(uid != 0);
 
-	old_path = file->file.cur_path;
-	p = strrchr(old_path, '/');
-	i_assert(p != NULL);
-	dir = t_strdup_until(old_path, p);
+	old_file = file->file.fs_file;
+	// TODO: use sdbox_file_make_path
+	sdbox_file_init_paths(file, t_strdup_printf(SDBOX_MAIL_FILE_FORMAT, uid));
+	FUNC_IN();
+	new_file = fs_file_init(file->mbox->storage->storage.mail_fs,
+					file->file.primary_path, FS_OPEN_MODE_REPLACE);
 
-	new_fname = t_strdup_printf(SDBOX_MAIL_FILE_FORMAT, uid);
-	new_path = t_strdup_printf("%s/%s", dir, new_fname);
-
-	if (!ignore_if_exists && stat(new_path, &st) == 0) {
+	FUNC_IN();
+	if (!ignore_if_exists && fs_exists(new_file) > 0) {
+		// TODO: catch error when fs_exists returns -1
 		mailbox_set_critical(&file->mbox->box,
-			"sdbox: %s already exists, rebuilding index", new_path);
+			"sdbox: %s already exists, rebuilding index",
+			_file->primary_path);
 		sdbox_set_mailbox_corrupted(&file->mbox->box);
 		return -1;
 	}
-	if (rename(old_path, new_path) < 0) {
+	FUNC_IN();
+	if (fs_rename(old_file, new_file) < 0) {
 		mailbox_set_critical(&file->mbox->box,
-				     "rename(%s, %s) failed: %m",
-				     old_path, new_path);
+				     "fs_rename(%s, %s) failed: %m",
+				     fs_file_path(old_file),
+				     fs_file_path(new_file));
 		return -1;
 	}
-	sdbox_file_init_paths(file, new_fname);
+	FUNC_IN();
+	fs_file_deinit(&new_file);
+	FUNC_IN();
+	dbox_file_close(_file);
+	FUNC_IN();
 	file->uid = uid;
 
 	if (array_is_created(&file->attachment_paths)) {
@@ -192,6 +191,7 @@ int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 	}
 	return 0;
 }
+*/
 
 static int sdbox_file_unlink_aborted_save_attachments(struct sdbox_file *file)
 {
@@ -237,31 +237,30 @@ int sdbox_file_unlink_aborted_save(struct sdbox_file *file)
 	FUNC_START();
 	int ret = 0;
 
-	if (unlink(file->file.cur_path) < 0) {
+	if (fs_delete(file->file.fs_file) < 0) {
+		FUNC_IN();
 		mailbox_set_critical(&file->mbox->box,
-			"unlink(%s) failed: %m", file->file.cur_path);
+			"fs_delete(%s) failed: %m", file->file.cur_path);
 		ret = -1;
 	}
 	if (array_is_created(&file->attachment_paths)) {
+		FUNC_IN();
 		if (sdbox_file_unlink_aborted_save_attachments(file) < 0)
 			ret = -1;
 	}
+	FUNC_IN();
 	return ret;
 }
 
-struct fs_file *sdbox_file_init_fs_file(struct dbox_file *file, const char *path, bool parents)
+struct fs_file *
+sdbox_file_init_fs_file(struct dbox_file *file, const char *path, bool parents)
 {
 	FUNC_START();
-	struct sdbox_file *sfile = (struct sdbox_file *)file;
+	struct sdbox_file *sfile = container_of(file, struct sdbox_file, file);
 	struct mailbox *box = &sfile->mbox->box;
-	const struct mailbox_permissions *perm = mailbox_get_permissions(box);
-	const char *p, *dir;
-	mode_t old_mask;
 	struct fs_file *fs_file;
 
-	old_mask = umask(0666 & ~perm->file_create_mode);
 	fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_REPLACE);
-	umask(old_mask);
 	if (fs_file == NULL) {
 		mailbox_set_critical(box, "fs_file_init(%s, FS_OPEN_MODE_REPLACE) failed: %m", path);
 	}

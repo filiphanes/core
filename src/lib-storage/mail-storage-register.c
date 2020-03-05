@@ -4,7 +4,6 @@
 #include "mail-storage.h"
 
 extern struct mail_storage shared_storage;
-extern struct mail_storage dbox_storage;
 extern struct mail_storage mdbox_storage;
 extern struct mail_storage mdbox_deleted_storage;
 extern struct mail_storage sdbox_storage;
@@ -19,7 +18,6 @@ extern struct mail_storage fail_storage;
 void mail_storage_register_all(void)
 {
 	mail_storage_class_register(&shared_storage);
-	mail_storage_class_register(&dbox_storage);
 	mail_storage_class_register(&mdbox_storage);
 	mail_storage_class_register(&mdbox_deleted_storage);
 	mail_storage_class_register(&sdbox_storage);

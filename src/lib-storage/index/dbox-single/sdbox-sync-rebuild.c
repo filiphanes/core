@@ -7,6 +7,7 @@
 #include "sdbox-storage.h"
 #include "sdbox-file.h"
 #include "sdbox-sync.h"
+#include "fs-api.h"
 
 #include <dirent.h>
 
@@ -70,22 +71,27 @@ sdbox_sync_add_file(struct index_rebuild_context *ctx,
 {
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(ctx->box);
 	struct dbox_file *file;
+	const char *uidstr = NULL;
 	uint32_t uid;
+	guid_128_t guid;
 	int ret;
 
-	if (!str_begins(fname, SDBOX_MAIL_FILE_PREFIX))
-		return 0;
-	fname += strlen(SDBOX_MAIL_FILE_PREFIX);
-
-	if (str_to_uint32(fname, &uid) < 0 || uid == 0) {
+	if (guid_128_from_string(fname, guid) < 0 || guid_128_is_empty(guid)) {
 		i_warning("sdbox %s: Ignoring invalid filename %s",
 			  mailbox_get_path(ctx->box), fname);
 		return 0;
 	}
 
-	file = sdbox_file_init(mbox, uid);
+	file = sdbox_file_init(mbox, guid);
 	if (!primary)
 		file->cur_path = file->alt_path;
+
+	fs_lookup_metadata(file->fs_file, "UID", &uidstr);
+	if (str_to_uint32(uidstr, &uid) < 0 || uid == 0) {
+		i_warning("sdbox %s: Ignoring invalid metadata UID %s",
+			  mailbox_get_path(ctx->box), fname);
+		return 0;
+	}
 	ret = sdbox_sync_add_file_index(ctx, file, uid, primary);
 	dbox_file_unref(&file);
 	return ret;

@@ -32,13 +32,17 @@ static int sdbox_mail_file_set(struct dbox_mail *mail)
 	struct mail *_mail = &mail->imail.mail.mail;
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(_mail->box);
 	bool deleted;
+	const void *guid;
 	int ret;
 
 	if (mail->open_file != NULL) {
 		/* already set */
 		return 0;
 	} else if (!_mail->saving) {
-		mail->open_file = sdbox_file_init(mbox, _mail->uid);
+		mail_index_lookup_ext(_mail->transaction->view, _mail->seq,
+					mbox->guid_ext_id, &guid, &deleted);
+		i_debug("sdbox_mail_file_set: hex guid=%s", guid_128_to_string(guid));
+		mail->open_file = sdbox_file_init(mbox, guid);
 		return 0;
 	} else {
 		/* mail is being saved in this transaction */

@@ -177,36 +177,21 @@ static int dbox_file_read_header(struct dbox_file *file)
 	return ret;
 }
 
-static int dbox_file_open_fd(struct dbox_file *file, bool try_altpath)
+static int dbox_file_open_fd(struct dbox_file *file, bool try_altpath ATTR_UNUSED)
 {
 	FUNC_START();
-	const char *path;
-	int flags = FS_OPEN_MODE_APPEND;
-	bool alt = FALSE;
+	// const char *path;
+	int flags = FS_OPEN_MODE_REPLACE;
+	// bool alt = FALSE;
 
-	/* try the primary path first */
-	path = file->primary_path;
-	while ((file->fs_file = fs_file_init(file->storage->mail_fs, file->cur_path, flags | FS_OPEN_FLAG_SEEKABLE)) == NULL) {
-		if (errno == EACCES && flags == FS_OPEN_MODE_APPEND) {
-			flags = FS_OPEN_MODE_READONLY;
-			continue;
-		}
-		if (errno != ENOENT) {
-			mail_storage_set_critical(&file->storage->storage,
-						  "open(%s) failed: %m", path);
-			return -1;
-		}
+	file->fs_file = fs_file_init(file->storage->mail_fs,
+								 file->primary_path, flags);
 
-		if (file->alt_path == NULL || alt || !try_altpath) {
-			/* not found */
-			return 0;
-		}
-
-		/* try the alternative path */
-		path = file->alt_path;
-		alt = TRUE;
+	if (errno == EACCES && flags == FS_OPEN_MODE_REPLACE) {
+		flags = FS_OPEN_MODE_READONLY;
 	}
-	file->cur_path = path;
+
+	file->cur_path = file->primary_path;
 	return 1;
 }
 
@@ -233,8 +218,6 @@ static int dbox_file_open_full(struct dbox_file *file, bool try_altpath,
 	}
 
 	file->input = fs_read_stream(file->fs_file, DBOX_READ_BLOCK_SIZE);
-	i_stream_set_name(file->input, file->cur_path);
-	i_stream_set_init_buffer_size(file->input, DBOX_READ_BLOCK_SIZE);
 	return dbox_file_read_header(file);
 }
 
@@ -725,15 +708,12 @@ int dbox_file_metadata_read(struct dbox_file *file)
 const char *dbox_file_metadata_get(struct dbox_file *file,
 				   enum dbox_metadata_key key)
 {
-	const char *const *metadata;
-	unsigned int i, count;
+	FUNC_START();
+	const char *value = NULL;
+	const char key_c[2] = {(char)key, 0};
 
-	metadata = array_get(&file->metadata, &count);
-	for (i = 0; i < count; i++) {
-		if (*metadata[i] == (char)key)
-			return metadata[i] + 1;
-	}
-	return NULL;
+	fs_lookup_metadata(file->fs_file, key_c, &value);
+	return value;
 }
 
 uoff_t dbox_file_get_plaintext_size(struct dbox_file *file)
