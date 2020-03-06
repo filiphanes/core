@@ -326,6 +326,17 @@ void fs_file_free(struct fs_file *file)
 	i_free(file->last_error);
 }
 
+void fs_file_set_flags(struct fs_file *file,
+		       enum fs_open_flags add_flags,
+		       enum fs_open_flags remove_flags)
+{
+	file->flags |= add_flags;
+	file->flags &= ~remove_flags;
+
+	if (file->parent != NULL)
+		fs_file_set_flags(file->parent, add_flags, remove_flags);
+}
+
 void fs_file_close(struct fs_file *file)
 {
 	if (file == NULL)
@@ -477,8 +488,9 @@ void fs_file_timing_end(struct fs_file *file, enum fs_op op)
 	file->timing_start[op].tv_sec = 0;
 }
 
-int fs_get_metadata(struct fs_file *file,
-		    const ARRAY_TYPE(fs_metadata) **metadata_r)
+int fs_get_metadata_full(struct fs_file *file,
+			 enum fs_get_metadata_flags flags,
+			 const ARRAY_TYPE(fs_metadata) **metadata_r)
 {
 	int ret;
 
@@ -493,16 +505,24 @@ int fs_get_metadata(struct fs_file *file,
 	}
 	if (!file->read_or_prefetch_counted &&
 	    !file->lookup_metadata_counted) {
-		file->lookup_metadata_counted = TRUE;
-		file->fs->stats.lookup_metadata_count++;
+		if ((flags & FS_GET_METADATA_FLAG_LOADED_ONLY) == 0) {
+			file->lookup_metadata_counted = TRUE;
+			file->fs->stats.lookup_metadata_count++;
+		}
 		fs_file_timing_start(file, FS_OP_METADATA);
 	}
 	T_BEGIN {
-		ret = file->fs->v.get_metadata(file, metadata_r);
+		ret = file->fs->v.get_metadata(file, flags, metadata_r);
 	} T_END;
 	if (!(ret < 0 && errno == EAGAIN))
 		fs_file_timing_end(file, FS_OP_METADATA);
 	return ret;
+}
+
+int fs_get_metadata(struct fs_file *file,
+		    const ARRAY_TYPE(fs_metadata) **metadata_r)
+{
+	return fs_get_metadata_full(file, 0, metadata_r);
 }
 
 int fs_lookup_metadata(struct fs_file *file, const char *key,
@@ -514,6 +534,15 @@ int fs_lookup_metadata(struct fs_file *file, const char *key,
 		return -1;
 	*value_r = fs_metadata_find(metadata, key);
 	return *value_r != NULL ? 1 : 0;
+}
+
+const char *fs_lookup_loaded_metadata(struct fs_file *file, const char *key)
+{
+	const ARRAY_TYPE(fs_metadata) *metadata;
+
+	if (fs_get_metadata_full(file, FS_GET_METADATA_FLAG_LOADED_ONLY, &metadata) < 0)
+		i_panic("FS_GET_METADATA_FLAG_LOADED_ONLY lookup can't fail");
+	return fs_metadata_find(metadata, key);
 }
 
 const char *fs_file_path(struct fs_file *file)
