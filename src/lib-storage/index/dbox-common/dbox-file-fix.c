@@ -338,13 +338,15 @@ dbox_file_fix_write_stream(struct dbox_file *file, uoff_t start_offset,
 		if (stream_copy(file, output, temp_path, start_offset) < 0)
 			return -1;
 	} else {
-		/* the file header is broken. recreate it */
+		/* the file header is broken. recreate it
 		if (dbox_file_header_write(file, output) < 0) {
 			dbox_file_set_syscall_error(file, "write()");
 			return -1;
 		}
+		 */
 	}
 
+	// TODO: don't use msg header
 	while ((ret = dbox_file_find_next_magic(file, &offset, &pre)) > 0) {
 		msg_size = offset - file->input->v_offset;
 		if (msg_size < 256 && pre) {

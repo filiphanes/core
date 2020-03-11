@@ -110,7 +110,6 @@ int sdbox_save_begin(struct mail_save_context *_ctx, struct istream *input)
 	int ret;
 
 	file = sdbox_file_init(ctx->mbox, guid);
-	file->fs_file = sdbox_file_init_fs_file(file, file->primary_path, FALSE);
 	ctx->append_ctx = dbox_file_append_init(file);
 	ret = dbox_file_get_append_stream(ctx->append_ctx,
 					  &ctx->ctx.dbox_output);
@@ -140,21 +139,22 @@ static void sdbox_save_set_fs_metadata(struct mail_save_context *_ctx,
 	const char *guid;
 	uoff_t vsize;
 
-	fs_set_metadata(file->fs_file, "Received-Time",
+	fs_set_metadata(file->fs_file, SDBOX_METADATA_RECEIVED_TIME,
 					i_strdup_printf("%"PRIxTIME_T, mdata->received_date));
 	if (mail_get_virtual_size(_ctx->dest_mail, &vsize) < 0)
 		i_unreached();
-	fs_set_metadata(file->fs_file, "Virtual-Size",
+	fs_set_metadata(file->fs_file, SDBOX_METADATA_VIRTUAL_SIZE,
 					i_strdup_printf("%llx", (unsigned long long)vsize));
 	if (mdata->pop3_uidl != NULL) {
 		i_assert(strchr(mdata->pop3_uidl, '\n') == NULL);
-		fs_set_metadata(file->fs_file, "POP3-UIDL", mdata->pop3_uidl);
+		fs_set_metadata(file->fs_file, SDBOX_METADATA_POP3_UIDL,
+						mdata->pop3_uidl);
 		ctx->have_pop3_uidls = TRUE;
 		ctx->highest_pop3_uidl_seq =
 			I_MAX(ctx->highest_pop3_uidl_seq, ctx->seq);
 	}
 	if (mdata->pop3_order != 0) {
-		fs_set_metadata(file->fs_file, "POP3-Order",
+		fs_set_metadata(file->fs_file, SDBOX_METADATA_POP3_ORDER,
 						i_strdup_printf("%u", mdata->pop3_order));
 		ctx->have_pop3_orders = TRUE;
 		ctx->highest_pop3_uidl_seq =
@@ -198,12 +198,11 @@ static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
 	guid_128_t guid_128;
 	unsigned int i, count;
 
-	i_assert(file->msg_header_size == sizeof(dbox_msg_hdr));
+	// we don't use header i_assert(file->msg_header_size == sizeof(dbox_msg_hdr));
 
 	message_size = ctx->dbox_output->offset -
 		file->msg_header_size - file->file_header_size;
 
-	// TODO: save metadata to HTTP X-Meta-* headers
 	sdbox_save_set_fs_metadata(_ctx, file,
 				 message_size, sctx->mbox->box.name, guid_128);
 	i_debug("guid after sdbox_save_set_fs_metadata: %s", guid_128_to_string(guid_128));
@@ -218,14 +217,6 @@ static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
 	// 					  sctx->mbox->guid_ext_id, &guid_128, &expunged);
 	i_debug("sdbox_save_mail_write_metadata: verified guid %s", guid_128_to_string(guid_128));
 
-	// TODO: don't write and parse msg headers
-	dbox_msg_header_fill(&dbox_msg_hdr, message_size);
-	if (o_stream_pwrite(ctx->dbox_output, &dbox_msg_hdr,
-			    sizeof(dbox_msg_hdr),
-			    file->file_header_size) < 0) {
-		dbox_file_set_syscall_error(file, "pwrite()");
-		return -1;
-	}
 	sfile->written_to_disk = TRUE;
 
 	/* remember the attachment paths until commit time */

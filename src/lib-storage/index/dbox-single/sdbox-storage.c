@@ -390,7 +390,9 @@ static void sdbox_mailbox_close(struct mailbox *box)
 
 	if (mbox->corrupted_rebuild_count != 0)
 		(void)sdbox_sync(mbox, 0);
+	FUNC_IN();
 	index_storage_mailbox_close(box);
+	FUNC_END();
 }
 
 static int

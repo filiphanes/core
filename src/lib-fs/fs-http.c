@@ -20,19 +20,6 @@
 #define MAX_MKDIR_RETRY_COUNT 5
 #define FS_HTTP_META_PREFIX "X-Meta-"
 
-#ifdef NDEBUG
-#define FUNC_START() ((void)0)
-#define FUNC_IN() ((void)0)
-#define FUNC_END() ((void)0)
-#define FUNC_END_RET(ignore) ((void)0)
-#define FUNC_END_RET_INT(ignore) ((void)0)
-#else
-#define FUNC_START()			i_debug("%s:%d %s() start", __FILE__, __LINE__, __FUNCTION__)
-#define FUNC_IN()				i_debug("%s:%d %s() in", __FILE__, __LINE__, __FUNCTION__)
-#define FUNC_END()				i_debug("%s:%d %s() end", __FILE__, __LINE__, __FUNCTION__)
-#define FUNC_END_RET(ret)		i_debug("%s:%d %s() return %s", __FILE__, __LINE__, __FUNCTION__, ret)
-#define FUNC_END_RET_INT(ret)	i_debug("%s:%d %s() return %d", __FILE__, __LINE__. __FUNCTION__, ret)
-#endif
 
 struct http_client *fs_http_client = NULL;
 
@@ -205,6 +192,7 @@ fs_http_file_init(struct fs_file *_file, const char *path,
 		p_strconcat(file->pool, fs->path_prefix, file->file.path, NULL);
 	file->response_data = str_new(file->pool, 256);
 	file->open_mode = mode;
+	file->st = p_new(file->pool, struct stat, 1);
 }
 
 static void fs_http_file_deinit(struct fs_file *_file)
@@ -275,7 +263,7 @@ fs_http_add_metadata_headers(struct fs_file *_file)
 		if (str_begins(metadata->key, FS_METADATA_INTERNAL_PREFIX))
 			continue;
 		/* truncate to keep prefix */
-		buffer_set_used_size(hdrkey, sizeof(FS_HTTP_META_PREFIX));
+		buffer_set_used_size(hdrkey, strlen(FS_HTTP_META_PREFIX));
 		// TODO: escape metadata->key
 		str_append(hdrkey, metadata->key);
 		http_client_request_add_header(file->request,
@@ -289,9 +277,10 @@ fs_http_response_callback(const struct http_response *response,
 		    		 struct http_fs_file *file)
 {
 	FUNC_START();
-	// const struct http_header_field *field;
-	// const ARRAY_TYPE(http_header_field) *header_fields;
+	const struct http_header_field *field;
+	const ARRAY_TYPE(http_header_field) *header_fields;
 	const unsigned char *data;
+	const char *name;
 	size_t size;
 
 	file->response_status = response->status;
@@ -300,27 +289,23 @@ fs_http_response_callback(const struct http_response *response,
 		return;
 	}
 
-	/*
-	FUNC_IN();
 	// Read metadata and st_size
 	header_fields = http_response_header_get_fields(response);
-	FUNC_IN();
 	array_foreach(header_fields, field) {
 		if (str_begins(field->name, FS_HTTP_META_PREFIX)) {
+			name = field->name + strlen(FS_HTTP_META_PREFIX);
 			fs_default_set_metadata(&file->file,
-				field->name+sizeof(FS_HTTP_META_PREFIX), field->value);
+							name, field->value);
 		} else if (strcasecmp(field->name, "Content-Length") == 0) {
-			if (str_parse_int64(field->value, &file->st->st_size, NULL) < 0){
+			if (str_to_int64(field->value, &file->st->st_size) < 0)
+			{
 				i_error("fs_http: Content-Length is not int: %s",
 						field->value);
 			}
 		}
 	}
-	*/
-	FUNC_IN();
 
 	str_truncate(file->response_data, 0);
-	FUNC_IN();
 
 	if (response->payload == NULL) {
 		return;
@@ -332,11 +317,11 @@ fs_http_response_callback(const struct http_response *response,
 		i_stream_skip(response->payload, size);
 	}
 	// TODO: set Object ID from PUT response headers or json
-	FUNC_IN();
 
 	if (file->callback != NULL) {
 		file->callback(file->callback_ctx);
 	}
+	file->request = NULL;
 	FUNC_END();
 }
 
@@ -490,30 +475,38 @@ static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 	i_assert(_file->output == NULL);
 
 	if (file->request == NULL) {
+		FUNC_IN();
 		file->response_status = 0;
 		file->request = http_client_request_url(fs_http_client,
 				"HEAD", file->url, fs_http_response_callback, file);
+		FUNC_IN();
 		fs_http_add_dovecot_headers(_file);
+		FUNC_IN();
 		http_client_request_submit(file->request);
 	}
 
 	while (file->response_status <= 0) {
 		if ((_file->flags & FS_OPEN_FLAG_ASYNC) != 0) {
+			FUNC_IN();
 			errno = EAGAIN;
 			return -1;
 		}
 		/* block */
+		FUNC_IN();
 		http_client_wait(fs_http_client);
 	}
 
 	if (file->response_status / 100 != 2) {
+		FUNC_IN();
 		ret = -1;
 		fs_set_error(_file->event, EIO, "HEAD %s returned status %d: %s",
 				file->url->path, file->response_status, str_c(file->response_data));
 	} else {
-		i_zero(&st_r);
+		FUNC_IN();
+		i_zero(st_r);
 		st_r->st_size = file->st->st_size;
 	}
+	FUNC_END();
 
 	return ret;
 }

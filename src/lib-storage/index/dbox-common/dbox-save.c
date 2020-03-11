@@ -54,6 +54,7 @@ void dbox_save_begin(struct dbox_save_context *ctx, struct istream *input)
 	/* write a dummy header. it'll get rewritten when we're finished */
 	i_zero(&dbox_msg_hdr);
 	o_stream_cork(ctx->dbox_output);
+	/*
 	if (o_stream_send(ctx->dbox_output, &dbox_msg_hdr,
 			  sizeof(dbox_msg_hdr)) < 0) {
 		mail_set_critical(_ctx->dest_mail, "write(%s) failed: %s",
@@ -61,6 +62,7 @@ void dbox_save_begin(struct dbox_save_context *ctx, struct istream *input)
 				  o_stream_get_error(ctx->dbox_output));
 		ctx->failed = TRUE;
 	}
+	*/
 	_ctx->data.output = ctx->dbox_output;
 
 	if (_ctx->data.received_date == (time_t)-1)

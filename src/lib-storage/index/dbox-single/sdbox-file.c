@@ -37,14 +37,13 @@ struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, guid_128_t guid)
 	T_BEGIN {
 		if (guid_128_is_empty(guid)) {
 			guid_128_generate(file->guid);
-			i_debug("sdbox_file_init: guid was empty, generated %s",
+			i_debug("sdbox_file_init: generated guid %s",
 					guid_128_to_string(file->guid));
 		} else {
 			// we will generate guid later in sdbox_save_mail_write_metadata
 			guid_128_copy(file->guid, guid);
-			i_debug("sdbox_file_init: using guid %s copied to %s",
-					guid_128_to_string(guid),
-					guid_128_to_string(file->guid));
+			i_debug("sdbox_file_init: given guid %s",
+				guid_128_to_string(file->guid));
 		}
 
 		fname = guid_128_to_string(file->guid);
@@ -74,16 +73,21 @@ int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
 	int ret;
 
 	*extrefs_r = NULL;
+	return 0; /* disables attachments */
 
 	/* read the metadata */
 	ret = dbox_file_open(file, &deleted);
 	if (ret > 0) {
-		if (deleted)
+		if (deleted) {
+			FUNC_END_RET_INT(0);
 			return 0;
+		}
 	}
 	if (ret <= 0) {
-		if (ret < 0)
+		if (ret < 0) {
+			FUNC_END_RET_INT(-1);
 			return -1;
+		}
 		/* corrupted file. we're deleting it anyway. */
 		line = NULL;
 	} else {
@@ -91,9 +95,11 @@ int sdbox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
 	}
 	if (line == NULL) {
 		/* no attachments */
+		FUNC_END_RET_INT(0);
 		return 0;
 	}
 	*extrefs_r = line;
+	FUNC_END_RET_INT(1);
 	return 1;
 }
 
@@ -362,12 +368,14 @@ int sdbox_file_unlink_with_attachments(struct sdbox_file *sfile)
 	int ret;
 
 	ret = sdbox_file_get_attachments(&sfile->file, &extrefs_line);
+	FUNC_IN();
 	if (ret < 0)
 		return -1;
 	if (ret == 0) {
 		/* no attachments */
 		return dbox_file_unlink(&sfile->file);
 	}
+	FUNC_IN();
 
 	pool = pool_alloconly_create("sdbox attachments unlink", 1024);
 	p_array_init(&extrefs, pool, 16);

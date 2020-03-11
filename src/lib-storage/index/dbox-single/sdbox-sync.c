@@ -13,6 +13,7 @@ static void
 dbox_sync_file_move_if_needed(struct dbox_file *file,
 			      enum sdbox_sync_entry_type type)
 {
+	FUNC_START();
 	struct stat st;
 	bool move_to_alt = type == SDBOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT;
 	bool deleted;
@@ -36,6 +37,7 @@ static void sdbox_sync_file(struct sdbox_sync_context *ctx,
 			    uint32_t seq, uint32_t uid,
 			    enum sdbox_sync_entry_type type)
 {
+	FUNC_START();
 	// struct dbox_file *file;
 	enum modify_type modify_type;
 
@@ -67,6 +69,7 @@ static void sdbox_sync_file(struct sdbox_sync_context *ctx,
 static void sdbox_sync_add(struct sdbox_sync_context *ctx,
 			   const struct mail_index_sync_rec *sync_rec)
 {
+	FUNC_START();
 	uint32_t uid;
 	enum sdbox_sync_entry_type type;
 	uint32_t seq, seq1, seq2;
@@ -102,6 +105,7 @@ static void sdbox_sync_add(struct sdbox_sync_context *ctx,
 
 static int sdbox_sync_index(struct sdbox_sync_context *ctx)
 {
+	FUNC_START();
 	struct mailbox *box = &ctx->mbox->box;
 	const struct mail_index_header *hdr;
 	struct mail_index_sync_rec sync_rec;
@@ -137,6 +141,7 @@ static int sdbox_sync_index(struct sdbox_sync_context *ctx)
 static void dbox_sync_file_expunge(struct sdbox_sync_context *ctx,
 				   uint32_t uid)
 {
+	FUNC_START();
 	struct mailbox *box = &ctx->mbox->box;
 	struct dbox_file *file;
 	struct sdbox_file *sfile;
@@ -158,11 +163,14 @@ static void dbox_sync_file_expunge(struct sdbox_sync_context *ctx,
 	/* do sync_notify only when the file was unlinked by us */
 	if (ret > 0 && box->v.sync_notify != NULL)
 		box->v.sync_notify(box, uid, MAILBOX_SYNC_TYPE_EXPUNGE);
+	FUNC_IN();
 	dbox_file_unref(&file);
+	FUNC_END();
 }
 
 static void dbox_sync_expunge_files(struct sdbox_sync_context *ctx)
 {
+	FUNC_START();
 	const uint32_t *uidp;
 
 	/* NOTE: Index is no longer locked. Multiple processes may be unlinking
@@ -179,6 +187,7 @@ static void dbox_sync_expunge_files(struct sdbox_sync_context *ctx)
 static int
 sdbox_refresh_header(struct sdbox_mailbox *mbox, bool retry, bool log_error)
 {
+	FUNC_START();
 	struct mail_index_view *view;
 	struct sdbox_index_header hdr;
 	bool need_resize;
@@ -198,6 +207,7 @@ sdbox_refresh_header(struct sdbox_mailbox *mbox, bool retry, bool log_error)
 int sdbox_sync_begin(struct sdbox_mailbox *mbox, enum sdbox_sync_flags flags,
 		     struct sdbox_sync_context **ctx_r)
 {
+	FUNC_START();
 	const struct mail_index_header *hdr =
 		mail_index_get_header(mbox->box.view);
 	struct sdbox_sync_context *ctx;
@@ -274,6 +284,7 @@ int sdbox_sync_begin(struct sdbox_mailbox *mbox, enum sdbox_sync_flags flags,
 
 int sdbox_sync_finish(struct sdbox_sync_context **_ctx, bool success)
 {
+	FUNC_START();
 	struct sdbox_sync_context *ctx = *_ctx;
 	int ret = success ? 0 : -1;
 
@@ -301,6 +312,7 @@ int sdbox_sync_finish(struct sdbox_sync_context **_ctx, bool success)
 
 int sdbox_sync(struct sdbox_mailbox *mbox, enum sdbox_sync_flags flags)
 {
+	FUNC_START();
 	struct sdbox_sync_context *sync_ctx;
 
 	if (sdbox_sync_begin(mbox, flags, &sync_ctx) < 0)
@@ -314,6 +326,7 @@ int sdbox_sync(struct sdbox_mailbox *mbox, enum sdbox_sync_flags flags)
 struct mailbox_sync_context *
 sdbox_storage_sync_init(struct mailbox *box, enum mailbox_sync_flags flags)
 {
+	FUNC_START();
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(box);
 	enum sdbox_sync_flags sdbox_sync_flags = 0;
 	int ret = 0;

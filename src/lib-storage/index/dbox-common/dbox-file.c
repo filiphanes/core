@@ -70,7 +70,8 @@ void dbox_file_init(struct dbox_file *file)
 {
 	FUNC_START();
 	file->refcount = 1;
-	file->fs_file = NULL;
+	file->fs_file = file->storage->v.file_init_fs_file(file,
+									file->primary_path, TRUE);
 	file->cur_offset = (uoff_t)-1;
 	file->cur_path = file->primary_path;
 }
@@ -218,7 +219,7 @@ static int dbox_file_open_full(struct dbox_file *file, bool try_altpath,
 	}
 
 	file->input = fs_read_stream(file->fs_file, DBOX_READ_BLOCK_SIZE);
-	return dbox_file_read_header(file);
+	return 1;
 }
 
 int dbox_file_open(struct dbox_file *file, bool *deleted_r)
@@ -371,8 +372,9 @@ int dbox_file_read_mail_header(struct dbox_file *file, uoff_t *physical_size_r)
 int dbox_file_seek(struct dbox_file *file, uoff_t offset)
 {
 	FUNC_START();
-	uoff_t size;
-	int ret;
+	// uoff_t size;
+	// int ret;
+	struct stat st;
 
 	i_assert(file->input != NULL);
 
@@ -380,12 +382,15 @@ int dbox_file_seek(struct dbox_file *file, uoff_t offset)
 		offset = file->file_header_size;
 
 	if (offset != file->cur_offset) {
+		/* TODO: don't use msg header
 		i_stream_seek(file->input, offset);
 		ret = dbox_file_read_mail_header(file, &size);
 		if (ret <= 0)
 			return ret;
+		*/
+		fs_stat(file->fs_file, &st);
 		file->cur_offset = offset;
-		file->cur_physical_size = size;
+		file->cur_physical_size = st.st_size;
 	}
 	i_stream_seek(file->input, offset + file->msg_header_size);
 	return 1;
@@ -578,10 +583,12 @@ int dbox_file_get_append_stream(struct dbox_file_append_context *ctx,
 
 	if (file->file_version == 0) {
 		/* newly created file, write the file header */
+		/*
 		if (dbox_file_header_write(file, ctx->output) < 0) {
 			dbox_file_set_syscall_error(file, "write()");
 			return -1;
 		}
+		*/
 		*output_r = ctx->output;
 		return 1;
 	}
@@ -710,9 +717,43 @@ const char *dbox_file_metadata_get(struct dbox_file *file,
 {
 	FUNC_START();
 	const char *value = NULL;
-	const char key_c[2] = {(char)key, 0};
+	const char *key_c;
+	struct stat st;
 
-	fs_lookup_metadata(file->fs_file, key_c, &value);
+	switch (key) {
+	case DBOX_METADATA_POP3_ORDER:
+		key_c = SDBOX_METADATA_POP3_ORDER;
+		break;
+	case DBOX_METADATA_POP3_UIDL:
+		key_c = SDBOX_METADATA_POP3_UIDL;
+		break;
+	case DBOX_METADATA_RECEIVED_TIME:
+		key_c = SDBOX_METADATA_RECEIVED_TIME;
+		break;
+	case DBOX_METADATA_EXT_REF:
+		key_c = SDBOX_METADATA_EXT_REF;
+		break;
+	case DBOX_METADATA_ORIG_MAILBOX:
+		key_c = SDBOX_METADATA_ORIG_MAILBOX;
+		break;
+	case DBOX_METADATA_GUID:
+		key_c = SDBOX_METADATA_GUID;
+		break;
+	case DBOX_METADATA_VIRTUAL_SIZE:
+		key_c = SDBOX_METADATA_VIRTUAL_SIZE;
+		if (fs_stat(file->fs_file, &st) >= 0) {
+			value = i_strdup_printf("%llx", st.st_size);
+		}
+		break;
+	case DBOX_METADATA_PHYSICAL_SIZE:
+		key_c = SDBOX_METADATA_PHYSICAL_SIZE;
+		break;
+	default:
+		i_unreached();
+	}
+	if (value == NULL) {
+		fs_lookup_metadata(file->fs_file, key_c, &value);
+	}
 	return value;
 }
 
@@ -721,18 +762,19 @@ uoff_t dbox_file_get_plaintext_size(struct dbox_file *file)
 	FUNC_START();
 	const char *value;
 	uintmax_t size;
-
-	i_assert(file->metadata_read_offset == file->cur_offset);
+	struct stat st;
 
 	/* see if we have it in metadata */
 	value = dbox_file_metadata_get(file, DBOX_METADATA_PHYSICAL_SIZE);
 	if (value == NULL ||
 	    str_to_uintmax_hex(value, &size) < 0 ||
 	    size > (uoff_t)-1) {
-		/* no. that means we can use the size in the header */
-		return file->cur_physical_size;
+		/* no. that means we can use the size from fs_stat */
+		if (fs_stat(file->fs_file, &st) < 0) {
+			i_error("");
+		}
+		return (uoff_t)st.st_size;
 	}
-
 	return (uoff_t)size;
 }
 
@@ -752,25 +794,14 @@ void dbox_msg_header_fill(struct dbox_message_header *dbox_msg_hdr,
 int dbox_file_unlink(struct dbox_file *file)
 {
 	FUNC_START();
-	const char *path;
-	bool alt = FALSE;
+	i_assert(file->fs_file != NULL);
 
-	path = file->primary_path;
-	// TODO: delete both file paths
-	while (fs_delete(file->fs_file) < 0) {
-		if (errno != ENOENT) {
-			mail_storage_set_critical(&file->storage->storage,
-				"fs_delete(%s) failed: %m", path);
-			return -1;
-		}
-		if (file->alt_path == NULL || alt) {
-			/* not found */
-			return 0;
-		}
-
-		/* try the alternative path */
-		path = file->alt_path;
-		alt = TRUE;
+	if (fs_delete(file->fs_file) < 0) {
+		mail_storage_set_critical(&file->storage->storage,
+			"fs_delete(%s) failed: %m", file->primary_path);
+		FUNC_END_RET_INT(-1);
+		return -1;
 	}
+	FUNC_END_RET_INT(1);
 	return 1;
 }
