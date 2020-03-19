@@ -84,21 +84,17 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 					" '%s': %s", args, error);
 		return -1;
 	}
-	i_debug("fs_http: url=%s", args);
 
 	tmp = t_strsplit_spaces(fs->url->enc_query, "&");
 	for (; *tmp != NULL; tmp++) {
 		const char *arg = *tmp;
 		if (str_begins(arg, "rawlog_dir=")) {
 			rawlog_dir = i_strdup(arg + 11);
-			i_debug("fs_http: rawlog_dir=%s", rawlog_dir);
 		} else if (strcmp(arg, "debug=yes") == 0) {
 			debug = TRUE;
-			i_debug("fs_http: debug=yes");
 		} else if (str_begins(arg, "prefix=")) {
 			i_free(fs->path_prefix);
 			fs->path_prefix = i_strdup(arg + 7);
-			i_debug("fs_http: prefix=%s", fs->path_prefix);
 		}
 	}
 
@@ -499,8 +495,8 @@ static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 	if (file->response_status / 100 != 2) {
 		FUNC_IN();
 		ret = -1;
-		fs_set_error(_file->event, EIO, "HEAD %s returned status %d: %s",
-				file->url->path, file->response_status, str_c(file->response_data));
+		fs_set_error(_file->event, EIO, "HEAD %s returned status %d",
+				file->url->path, file->response_status);
 	} else {
 		FUNC_IN();
 		i_zero(st_r);

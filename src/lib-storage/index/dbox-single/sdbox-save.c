@@ -162,14 +162,12 @@ static void sdbox_save_set_fs_metadata(struct mail_save_context *_ctx,
 	}
 
 	guid = mdata->guid;
-	i_debug("mdata->guid: %s", guid);
 	if (guid != NULL) {
+		i_debug("mdata->guid: %s", guid);
 		mail_generate_guid_128_hash(guid, guid_128);
-		i_debug("guid after mail_generate_guid_128_hash: %s", guid_128_to_string(guid_128));
 	} else {
 		guid_128_generate(guid_128);
 		guid = guid_128_to_string(guid_128);
-		i_debug("guid after guid_128_generate: %s", guid_128_to_string(guid_128));
 	}
 	fs_set_metadata(file->fs_file, FS_METADATA_WRITE_FNAME,
 			(const char*) sdbox_file_make_path(sfile, guid));
@@ -215,7 +213,6 @@ static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
 	// bool expunged;
 	// mail_index_lookup_ext(ctx->trans, ctx->seq,
 	// 					  sctx->mbox->guid_ext_id, &guid_128, &expunged);
-	i_debug("sdbox_save_mail_write_metadata: verified guid %s", guid_128_to_string(guid_128));
 
 	sfile->written_to_disk = TRUE;
 
@@ -365,10 +362,7 @@ static void dbox_save_unref_files(struct sdbox_save_context *ctx)
 	files = array_get_modifiable(&ctx->files, &count);
 	for (i = 0; i < count; i++) {
 		if (ctx->ctx.failed) {
-			struct sdbox_file *sfile =
-				(struct sdbox_file *)files[i];
-
-			(void)sdbox_file_unlink_aborted_save(sfile);
+			(void)sdbox_file_unlink_aborted_save(files[i]);
 		}
 		dbox_file_unref(&files[i]);
 	}

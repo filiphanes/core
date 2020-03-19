@@ -37,13 +37,9 @@ struct dbox_file *sdbox_file_init(struct sdbox_mailbox *mbox, guid_128_t guid)
 	T_BEGIN {
 		if (guid_128_is_empty(guid)) {
 			guid_128_generate(file->guid);
-			i_debug("sdbox_file_init: generated guid %s",
-					guid_128_to_string(file->guid));
 		} else {
 			// we will generate guid later in sdbox_save_mail_write_metadata
 			guid_128_copy(file->guid, guid);
-			i_debug("sdbox_file_init: given guid %s",
-				guid_128_to_string(file->guid));
 		}
 
 		fname = guid_128_to_string(file->guid);
@@ -238,23 +234,26 @@ static int sdbox_file_unlink_aborted_save_attachments(struct sdbox_file *file)
 	return ret;
 }
 
-int sdbox_file_unlink_aborted_save(struct sdbox_file *file)
+int sdbox_file_unlink_aborted_save(struct dbox_file *file)
 {
 	FUNC_START();
+	struct sdbox_file *sfile = container_of(file, struct sdbox_file, file);
 	int ret = 0;
 
-	if (fs_delete(file->file.fs_file) < 0) {
-		FUNC_IN();
-		mailbox_set_critical(&file->mbox->box,
-			"fs_delete(%s) failed: %m", file->file.cur_path);
+	i_assert(file->fs_file != NULL);
+
+	if (fs_delete(file->fs_file) < 0) {
+		mailbox_set_critical(&sfile->mbox->box,
+			"fs_delete(%s) failed: %m", file->cur_path);
 		ret = -1;
 	}
-	if (array_is_created(&file->attachment_paths)) {
-		FUNC_IN();
+	/*
+	if (array_is_created(&sfile->attachment_paths)) {
 		if (sdbox_file_unlink_aborted_save_attachments(file) < 0)
 			ret = -1;
 	}
-	FUNC_IN();
+	*/
+	FUNC_END_RET_INT(ret);
 	return ret;
 }
 
