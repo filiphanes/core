@@ -153,8 +153,9 @@ static void stats_metrics_add_set(struct stats_metrics *metrics,
 	fields = t_strsplit_spaces(set->fields, " ");
 	metric = stats_metric_alloc(metrics->pool, set->name, fields);
 
-	if (*set->group_by != '\0')
-		metric->group_by = (const char *const *)p_strsplit_spaces(metrics->pool, set->group_by, " ");
+	if (array_is_created(&set->parsed_group_by))
+		metric->group_by = array_get(&set->parsed_group_by,
+					     &metric->group_by_count);
 
 	array_push_back(&metrics->metrics, &metric);
 
@@ -318,13 +319,21 @@ stats_metric_get_sub_metric(struct metric *metric,
 
 	/* lookup sub-metric */
 	array_foreach (&metric->sub_metrics, sub_metrics) {
-		if ((*sub_metrics)->group_value.type == METRIC_VALUE_TYPE_STR &&
-		    memcmp((*sub_metrics)->group_value.hash, value->hash,
-			   SHA1_RESULTLEN) == 0)
-			return *sub_metrics;
-		else if ((*sub_metrics)->group_value.type == METRIC_VALUE_TYPE_INT &&
-		    (*sub_metrics)->group_value.intmax == value->intmax)
-			return *sub_metrics;
+		switch ((*sub_metrics)->group_value.type) {
+		case METRIC_VALUE_TYPE_STR:
+			if (memcmp((*sub_metrics)->group_value.hash, value->hash,
+				   SHA1_RESULTLEN) == 0)
+				return *sub_metrics;
+			break;
+		case METRIC_VALUE_TYPE_INT:
+			if ((*sub_metrics)->group_value.intmax == value->intmax)
+				return *sub_metrics;
+			break;
+		case METRIC_VALUE_TYPE_BUCKET_INDEX:
+			if ((*sub_metrics)->group_value.intmax == value->intmax)
+				return *sub_metrics;
+			break;
+		}
 	}
 	return NULL;
 }
@@ -345,33 +354,136 @@ stats_metric_sub_metric_alloc(struct metric *metric, const char *name, pool_t po
 	return sub_metric;
 }
 
+static bool
+stats_metric_group_by_discrete(const struct event_field *field,
+			       struct metric_value *value)
+{
+	switch (field->value_type) {
+	case EVENT_FIELD_VALUE_TYPE_STR:
+		value->type = METRIC_VALUE_TYPE_STR;
+		/* use sha1 of value to avoid excessive memory usage in case the
+		   actual value is quite long */
+		sha1_get_digest(field->value.str, strlen(field->value.str),
+				value->hash);
+		return TRUE;
+	case EVENT_FIELD_VALUE_TYPE_INTMAX:
+		value->type = METRIC_VALUE_TYPE_INT;
+		value->intmax = field->value.intmax;
+		return TRUE;
+	case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
+		return FALSE;
+	}
+
+	i_unreached();
+}
+
+/* convert the value to a bucket index */
+static bool
+stats_metric_group_by_quantized(const struct event_field *field,
+				struct metric_value *value,
+				const struct stats_metric_settings_group_by *group_by)
+{
+	switch (field->value_type) {
+	case EVENT_FIELD_VALUE_TYPE_STR:
+	case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
+		return FALSE;
+	case EVENT_FIELD_VALUE_TYPE_INTMAX:
+		break;
+	}
+
+	value->type = METRIC_VALUE_TYPE_BUCKET_INDEX;
+
+	for (unsigned int i = 0; i < group_by->num_ranges; i++) {
+		if ((field->value.intmax <= group_by->ranges[i].min) ||
+		    (field->value.intmax > group_by->ranges[i].max))
+			continue;
+
+		value->intmax = i;
+		return TRUE;
+	}
+
+	i_panic("failed to find a matching bucket for '%s'=%jd",
+		group_by->field, field->value.intmax);
+}
+
+/* convert value to a bucket label */
+static const char *
+stats_metric_group_by_quantized_label(const struct event_field *field,
+				      const struct stats_metric_settings_group_by *group_by,
+				      const size_t bucket_index)
+{
+	const struct stats_metric_settings_bucket_range *range = &group_by->ranges[bucket_index];
+	const char *name = group_by->field;
+	const char *label;
+
+	switch (field->value_type) {
+	case EVENT_FIELD_VALUE_TYPE_STR:
+	case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
+		i_unreached();
+	case EVENT_FIELD_VALUE_TYPE_INTMAX:
+		break;
+	}
+
+	if (range->min == INTMAX_MIN)
+		label = t_strdup_printf("%s_ninf_%jd", name, range->max);
+	else if (range->max == INTMAX_MAX)
+		label = t_strdup_printf("%s_%jd_inf", name, range->min + 1);
+	else
+		label = t_strdup_printf("%s_%jd_%jd", name,
+					range->min + 1, range->max);
+
+	return label;
+}
+
+static bool
+stats_metric_group_by_get_value(const struct event_field *field,
+				const struct stats_metric_settings_group_by *group_by,
+				struct metric_value *value)
+{
+	switch (group_by->func) {
+	case STATS_METRIC_GROUPBY_DISCRETE:
+		if (!stats_metric_group_by_discrete(field, value))
+			return FALSE;
+		return TRUE;
+	case STATS_METRIC_GROUPBY_QUANTIZED:
+		if (!stats_metric_group_by_quantized(field, value, group_by))
+			return FALSE;
+		return TRUE;
+	}
+
+	i_panic("unknown group-by function %d", group_by->func);
+}
+
+static const char *
+stats_metric_group_by_get_label(const struct event_field *field,
+				const struct stats_metric_settings_group_by *group_by,
+				const struct metric_value *value)
+{
+	switch (group_by->func) {
+	case STATS_METRIC_GROUPBY_DISCRETE:
+		i_unreached();
+	case STATS_METRIC_GROUPBY_QUANTIZED:
+		return stats_metric_group_by_quantized_label(field, group_by,
+							     value->intmax);
+	}
+
+	i_panic("unknown group-by function %d", group_by->func);
+}
+
 static void
 stats_metric_group_by(struct metric *metric, struct event *event, pool_t pool)
 {
+	const struct stats_metric_settings_group_by *group_by = &metric->group_by[0];
+	const struct event_field *field = event_find_field(event, group_by->field);
 	struct metric *sub_metric;
-	const char *const *group = metric->group_by;
-	const struct event_field *field =
-		event_find_field(event, *group);
 	struct metric_value value;
 
 	/* ignore missing field */
 	if (field == NULL)
 		return;
-	switch (field->value_type) {
-	case EVENT_FIELD_VALUE_TYPE_STR:
-		value.type = METRIC_VALUE_TYPE_STR;
-		/* use sha1 of value to avoid excessive memory usage in case the
-		   actual value is quite long */
-		sha1_get_digest(field->value.str, strlen(field->value.str),
-				value.hash);
-		break;
-	case EVENT_FIELD_VALUE_TYPE_INTMAX:
-		value.type = METRIC_VALUE_TYPE_INT;
-		value.intmax = field->value.intmax;
-		break;
-	case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
+
+	if (!stats_metric_group_by_get_value(field, group_by, &value))
 		return;
-	}
 
 	if (!array_is_created(&metric->sub_metrics))
 		p_array_init(&metric->sub_metrics, pool, 8);
@@ -379,17 +491,29 @@ stats_metric_group_by(struct metric *metric, struct event *event, pool_t pool)
 	sub_metric = stats_metric_get_sub_metric(metric, &value);
 
 	if (sub_metric == NULL) T_BEGIN {
-		const char *value_label;
-		if (value.type == METRIC_VALUE_TYPE_STR)
+		const char *value_label = NULL;
+
+		switch (value.type) {
+		case METRIC_VALUE_TYPE_STR:
 			value_label = field->value.str;
-		else if (value.type == METRIC_VALUE_TYPE_INT)
+			break;
+		case METRIC_VALUE_TYPE_INT:
 			value_label = dec2str(field->value.intmax);
-		else
-			i_unreached();
+			break;
+		case METRIC_VALUE_TYPE_BUCKET_INDEX:
+			value_label = stats_metric_group_by_get_label(field,
+								      group_by,
+								      &value);
+			break;
+		}
+
 		sub_metric = stats_metric_sub_metric_alloc(metric, value_label,
 							   pool);
-		if (group[1] != NULL)
-			sub_metric->group_by = group+1;
+		if (metric->group_by_count > 1) {
+			sub_metric->group_by_count = metric->group_by_count - 1;
+			sub_metric->group_by = &metric->group_by[1];
+		}
+		sub_metric->group_value.type = value.type;
 		sub_metric->group_value.intmax = value.intmax;
 		memcpy(sub_metric->group_value.hash, value.hash, SHA1_RESULTLEN);
 	} T_END;
@@ -400,33 +524,41 @@ stats_metric_group_by(struct metric *metric, struct event *event, pool_t pool)
 }
 
 static void
+stats_metric_event_field(struct event *event, const char *fieldname,
+			 struct stats_dist *stats)
+{
+	const struct event_field *field = event_find_field(event, fieldname);
+	intmax_t num = 0;
+
+	if (field == NULL)
+		return;
+
+	switch (field->value_type) {
+	case EVENT_FIELD_VALUE_TYPE_STR:
+		break;
+	case EVENT_FIELD_VALUE_TYPE_INTMAX:
+		num = field->value.intmax;
+		break;
+	case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
+		num = field->value.timeval.tv_sec * 1000000ULL +
+			field->value.timeval.tv_usec;
+		break;
+	}
+
+	stats_dist_add(stats, num);
+}
+
+static void
 stats_metric_event(struct metric *metric, struct event *event, pool_t pool)
 {
-	intmax_t duration;
+	/* duration is special - we always add it */
+	stats_metric_event_field(event, "duration",
+				 metric->duration_stats);
 
-	event_get_last_duration(event, &duration);
-	stats_dist_add(metric->duration_stats, duration);
-
-	for (unsigned int i = 0; i < metric->fields_count; i++) {
-		const struct event_field *field =
-			event_find_field(event, metric->fields[i].field_key);
-		if (field == NULL)
-			continue;
-
-		intmax_t num = 0;
-		switch (field->value_type) {
-		case EVENT_FIELD_VALUE_TYPE_STR:
-			break;
-		case EVENT_FIELD_VALUE_TYPE_INTMAX:
-			num = field->value.intmax;
-			break;
-		case EVENT_FIELD_VALUE_TYPE_TIMEVAL:
-			num = field->value.timeval.tv_sec * 1000000ULL +
-				field->value.timeval.tv_usec;
-			break;
-		}
-		stats_dist_add(metric->fields[i].stats, num);
-	}
+	for (unsigned int i = 0; i < metric->fields_count; i++)
+		stats_metric_event_field(event,
+					 metric->fields[i].field_key,
+					 metric->fields[i].stats);
 
 	if (metric->group_by != NULL)
 		stats_metric_group_by(metric, event, pool);
@@ -460,6 +592,13 @@ void stats_metrics_event(struct stats_metrics *metrics, struct event *event,
 {
 	struct event_filter_match_iter *iter;
 	struct metric *metric;
+	intmax_t duration;
+
+	/* Note: Adding the field here means that it will get exported
+	   below.  This is necessary to allow group-by functions to quantize
+	   based on the event duration. */
+	event_get_last_duration(event, &duration);
+	event_add_int(event, "duration", duration);
 
 	/* process stats */
 	iter = event_filter_match_iter_init(metrics->stats_filter, event, ctx);

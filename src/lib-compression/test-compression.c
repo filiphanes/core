@@ -336,9 +336,9 @@ static void test_compression_handler_partial_parent_write(const struct compressi
 	struct ostream *os_compressed = handler->create_ostream(os, 9);
 	o_stream_unref(&os);
 
-	unsigned char input_buffer[256];
+	unsigned char input_buffer[64];
 	/* create unlikely compressible data */
-	random_fill(input_buffer, 64);
+	random_fill(input_buffer, sizeof(input_buffer));
 
 	for (unsigned int i = 0; i < 10; i++) {
 		/* write it to stream */
@@ -512,7 +512,7 @@ test_compression_handler_random_io(const struct compression_handler *handler)
 		}
 
 		if (test_has_failed()) {
-			i_info("Test parameters: size=%"PRIuSIZE_T,
+			i_info("Test parameters: size=%zu",
 				in_buf_size);
 		}
 

@@ -17,12 +17,8 @@ void dbox_save_add_to_index(struct dbox_save_context *ctx)
 	struct mail_save_data *mdata = &ctx->ctx.data;
 	enum mail_flags save_flags;
 
-	if ((ctx->ctx.transaction->flags & MAILBOX_TRANSACTION_FLAG_FILL_IN_STUB) == 0)
-		mail_index_append(ctx->trans, mdata->uid, &ctx->seq);
-	else
-		ctx->seq = mdata->stub_seq;
-
 	save_flags = mdata->flags & ~MAIL_RECENT;
+	mail_index_append(ctx->trans, mdata->uid, &ctx->seq);
 	mail_index_update_flags(ctx->trans, ctx->seq, MODIFY_REPLACE,
 				save_flags);
 	if (mdata->keywords != NULL) {
@@ -155,7 +151,7 @@ void dbox_save_write_metadata(struct mail_save_context *_ctx,
 		str_printfa(str, "%c%llx\n", DBOX_METADATA_PHYSICAL_SIZE,
 			    (unsigned long long)ctx->input->v_offset);
 	}
-	str_printfa(str, "%c%"PRIxTIME_T"\n", DBOX_METADATA_RECEIVED_TIME,
+	str_printfa(str, "%c%zu\n", DBOX_METADATA_RECEIVED_TIME,
 		    mdata->received_date);
 	if (mail_get_virtual_size(_ctx->dest_mail, &vsize) < 0)
 		i_unreached();

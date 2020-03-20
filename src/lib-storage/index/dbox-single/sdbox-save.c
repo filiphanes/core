@@ -140,7 +140,7 @@ static void sdbox_save_set_fs_metadata(struct mail_save_context *_ctx,
 	uoff_t vsize;
 
 	fs_set_metadata(file->fs_file, SDBOX_METADATA_RECEIVED_TIME,
-					i_strdup_printf("%"PRIxTIME_T, mdata->received_date));
+					i_strdup_printf("%zu", mdata->received_date));
 	if (mail_get_virtual_size(_ctx->dest_mail, &vsize) < 0)
 		i_unreached();
 	fs_set_metadata(file->fs_file, SDBOX_METADATA_VIRTUAL_SIZE,
@@ -319,7 +319,7 @@ static int dbox_save_assign_uids(struct sdbox_save_context *ctx,
 
 		ret = seq_range_array_iter_nth(&iter, n++, &uid);
 		i_assert(ret);
-		if (sdbox_file_assign_uid(sfile, uid, FALSE) < 0)
+		if (sdbox_file_assign_uid(sfile, uid) < 0)
 			return -1;
 		if (ctx->ctx.highest_pop3_uidl_seq == i+1) {
 			index_pop3_uidl_set_max_uid(&ctx->mbox->box,
@@ -327,28 +327,6 @@ static int dbox_save_assign_uids(struct sdbox_save_context *ctx,
 		}
 	}
 	i_assert(!seq_range_array_iter_nth(&iter, n, &uid));
-	return 0;
-}
-
-static int dbox_save_assign_stub_uids(struct sdbox_save_context *ctx)
-{
-	FUNC_START();
-	struct dbox_file *const *files;
-	unsigned int i, count;
-
-	files = array_get(&ctx->files, &count);
-	for (i = 0; i < count; i++) {
-		struct sdbox_file *sfile = (struct sdbox_file *)files[i];
-		uint32_t uid;
-
-		mail_index_lookup_uid(ctx->ctx.trans->view,
-				      ctx->first_saved_seq + i, &uid);
-		i_assert(uid != 0);
-
-		if (sdbox_file_assign_uid(sfile, uid, TRUE) < 0)
-			return -1;
-	}
-
 	return 0;
 }
 */
@@ -393,27 +371,19 @@ int sdbox_transaction_save_commit_pre(struct mail_save_context *_ctx)
 	dbox_save_update_header_flags(&ctx->ctx, ctx->sync_ctx->sync_view,
 		ctx->mbox->hdr_ext_id, offsetof(struct sdbox_index_header, flags));
 
+	/* assign UIDs for new messages */
 	hdr = mail_index_get_header(ctx->sync_ctx->sync_view);
 
 	// TODO: move uid assignment to sdbox_save_begin by setting FS_METADATA_WRITE_FNAME
-	if ((_ctx->transaction->flags & MAILBOX_TRANSACTION_FLAG_FILL_IN_STUB) == 0) {
-		/* assign UIDs for new messages */
-		mail_index_append_finish_uids(ctx->ctx.trans, hdr->next_uid,
-					      &_t->changes->saved_uids);
-		/* TODO: don't assign uids, but save with immutable message guids
-		if (dbox_save_assign_uids(ctx, &_t->changes->saved_uids) < 0) {
-			sdbox_transaction_save_rollback(_ctx);
-			return -1;
-		}
-		*/
-	} else {
-		/* assign UIDs that we stashed away 
-		if (dbox_save_assign_stub_uids(ctx) < 0) {
-			sdbox_transaction_save_rollback(_ctx);
-			return -1;
-		}
-		*/
+	/* assign UIDs for new messages */
+	mail_index_append_finish_uids(ctx->ctx.trans, hdr->next_uid,
+						&_t->changes->saved_uids);
+	/* TODO: don't assign uids, but save with immutable message guids
+	if (dbox_save_assign_uids(ctx, &_t->changes->saved_uids) < 0) {
+		sdbox_transaction_save_rollback(_ctx);
+		return -1;
 	}
+	*/
 
 	_t->changes->uid_validity = hdr->uid_validity;
 	return 0;

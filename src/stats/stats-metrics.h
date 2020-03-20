@@ -55,6 +55,7 @@ struct metric_field {
 enum metric_value_type {
 	METRIC_VALUE_TYPE_STR,
 	METRIC_VALUE_TYPE_INT,
+	METRIC_VALUE_TYPE_BUCKET_INDEX,
 };
 
 struct metric_value {
@@ -88,7 +89,8 @@ struct metric {
 	unsigned int fields_count;
 	struct metric_field *fields;
 
-	const char *const *group_by;
+	unsigned int group_by_count;
+	const struct stats_metric_settings_group_by *group_by;
 	struct metric_value group_value;
 	ARRAY(struct metric *) sub_metrics;
 

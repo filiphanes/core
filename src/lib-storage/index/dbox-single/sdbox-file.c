@@ -146,8 +146,7 @@ static int sdbox_file_rename_attachments(struct sdbox_file *file)
 }
 
 /*
-int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
-			  bool ignore_if_exists)
+int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid)
 {
 	FUNC_START();
 	struct dbox_file *_file = &file->file;
@@ -164,7 +163,7 @@ int sdbox_file_assign_uid(struct sdbox_file *file, uint32_t uid,
 					file->file.primary_path, FS_OPEN_MODE_REPLACE);
 
 	FUNC_IN();
-	if (!ignore_if_exists && fs_exists(new_file) > 0) {
+	if (fs_exists(new_file) > 0) {
 		// TODO: catch error when fs_exists returns -1
 		mailbox_set_critical(&file->mbox->box,
 			"sdbox: %s already exists, rebuilding index",
