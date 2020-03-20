@@ -28,6 +28,9 @@ struct http_fs {
 	char *root_path;
 	char *path_prefix;
 	struct http_url *url;
+
+	unsigned int slow_warn_msec;
+	bool no_trace_headers;
 	bool have_dirs;
 };
 
@@ -72,9 +75,8 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
 	struct http_client_settings http_set;
 	const char *error;
-	bool debug = FALSE;
-	const char *rawlog_dir = NULL;
 	const char *const *tmp;
+	unsigned int uint;
 
 	fs->fs.set.root_path = fs->root_path;
 
@@ -85,32 +87,70 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 		return -1;
 	}
 
+	i_zero(&http_set);
+	http_set.event_parent = set->event;
+
 	tmp = t_strsplit_spaces(fs->url->enc_query, "&");
 	for (; *tmp != NULL; tmp++) {
 		const char *arg = *tmp;
-		if (str_begins(arg, "rawlog_dir=")) {
-			rawlog_dir = i_strdup(arg + 11);
-		} else if (strcmp(arg, "debug=yes") == 0) {
-			debug = TRUE;
-		} else if (str_begins(arg, "prefix=")) {
+		if (str_begins(arg, "prefix=")) {
 			i_free(fs->path_prefix);
 			fs->path_prefix = i_strdup(arg + 7);
+		} else if (str_begins(arg, "no_trace_headers=")) {
+			fs->no_trace_headers = (arg[6] == 'y' || arg[6] == '1');
+		} else if (str_begins(arg, "slow_warn=")) {
+			/* TODO: implement warning about slow requests */
+			if (str_parse_uint(arg+10, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			fs->slow_warn_msec = uint * 1000;
+		} else if (str_begins(arg, "rawlog_dir=")) {
+			http_set.rawlog_dir = i_strdup(arg + 11);
+		} else if (str_begins(arg, "debug=") == 0) {
+			http_set.debug = (arg[6] == 'y' || arg[6] == '1');
+		} else if (str_begins(arg, "timeout=")) {
+			if (str_parse_uint(arg+8, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			http_set.request_timeout_msecs = uint * 1000;
+		} else if (str_begins(arg, "absolute_timeout=")) {
+			if (str_parse_uint(arg+17, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			http_set.request_absolute_timeout_msecs = uint * 1000;
+		} else if (str_begins(arg, "connect_timeout=")) {
+			if (str_parse_uint(arg+16, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			http_set.connect_timeout_msecs = uint * 1000;
+		} else if (str_begins(arg, "request_timeout=")) {
+			if (str_parse_uint(arg+16, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			http_set.request_timeout_msecs = uint * 1000;
+		} else if (str_begins(arg, "max_retries=")) {
+			if (str_parse_uint(arg+12, &uint, NULL) < 0) {
+				*error_r = t_strdup_printf("Invalid uint '%s'", arg);
+				return -1;
+			}
+			http_set.max_attempts = uint * 1000;
 		}
 	}
 
 	if (fs_http_client == NULL) {
-		i_zero(&http_set);
 		http_set.max_idle_time_msecs = 5*1000;
 		http_set.max_parallel_connections = 10;
 		http_set.max_pipelined_requests = 10;
 		http_set.max_redirects = 1;
 		http_set.max_attempts = 3;
 		http_set.connect_timeout_msecs = 5*1000;
-		http_set.request_timeout_msecs = 60*1000;
 		http_set.ssl = set->ssl_client_set;
 		http_set.dns_client = set->dns_client;
-		http_set.debug = debug;
-		http_set.rawlog_dir = rawlog_dir;
 		fs_http_client = http_client_init(&http_set);
 	}
 
@@ -122,6 +162,7 @@ static void fs_http_deinit(struct fs *_fs)
 	FUNC_START();
 	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
 
+	i_free(fs->url);
 	i_free(fs->path_prefix);
 	i_free(fs->root_path);
 	i_free(fs);
@@ -161,7 +202,7 @@ static struct fs_file *fs_http_file_alloc(void)
 
 static void
 fs_http_file_init(struct fs_file *_file, const char *path,
-		   enum fs_open_mode mode, enum fs_open_flags flags)
+		   enum fs_open_mode mode, enum fs_open_flags flags ATTR_UNUSED)
 {
 	FUNC_START();
 	struct http_fs_file *file =
@@ -224,25 +265,27 @@ fs_http_wait_async(struct fs *_fs ATTR_UNUSED)
 }
 
 static void
-fs_http_add_dovecot_headers(struct fs_file *_file)
+fs_http_add_trace_headers(struct fs_file *_file)
 {
 	FUNC_START();
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
-	const char *val = NULL;
+	struct http_fs *fs =
+		container_of(_file->fs, struct http_fs, fs);
+
+	if (fs->no_trace_headers)
+		return;
 
 	http_client_request_add_header(file->request, "X-Dovecot-Username",
-			_file->fs->username);
+								   _file->fs->username);
 	http_client_request_add_header(file->request, "X-Dovecot-Session-Id",
 			_file->fs->session_id);
-
-	if (fs_lookup_metadata(_file, FS_METADATA_OBJECTID, &val) >= 0) {
-		if (val != NULL) {
-			http_client_request_add_header(file->request, "X-Dovecot-Object-Id", val);
-		}
-	} else if (errno == ENOTSUP) {
-		i_debug("Metadata not supported!");
-	} // TODO: else if (errno == EAGAIN){
+	/* TODO: somehow get reason from box->reason, maybe via metadata
+	const char *val = NULL;
+	if (fs_lookup_metadata(_file, FS_METADATA_REASON, &val) >= 0 && val != NULL) {
+		http_client_request_add_header(file->request, "X-Dovecot-Reason", val);
+	}
+	*/
 }
 
 static void
@@ -252,6 +295,7 @@ fs_http_add_metadata_headers(struct fs_file *_file)
 	struct http_fs_file *file =
 		container_of(_file, struct http_fs_file, file);
 	const struct fs_metadata *metadata;
+	const char *val = NULL;
 	string_t *hdrkey = str_new(file->pool, 64);
 	str_append(hdrkey, FS_HTTP_META_PREFIX);
 
@@ -265,6 +309,15 @@ fs_http_add_metadata_headers(struct fs_file *_file)
 		http_client_request_add_header(file->request,
 			str_c(hdrkey), metadata->value);
 	}
+
+	if (fs_lookup_metadata(_file, FS_METADATA_OBJECTID, &val) >= 0) {
+		if (val != NULL) {
+			http_client_request_add_header(file->request, "X-ObjectID", val);
+		}
+	} else if (errno == ENOTSUP) {
+		i_debug("Metadata not supported!");
+	} // TODO: else if (errno == EAGAIN){
+
 	str_free(&hdrkey);
 }
 
@@ -293,11 +346,13 @@ fs_http_response_callback(const struct http_response *response,
 			fs_default_set_metadata(&file->file,
 							name, field->value);
 		} else if (strcasecmp(field->name, "Content-Length") == 0) {
-			if (str_to_int64(field->value, &file->st->st_size) < 0)
-			{
+			if (str_to_int64(field->value, &file->st->st_size) < 0) {
 				i_error("fs_http: Content-Length is not int: %s",
 						field->value);
 			}
+		} else if (strcasecmp(field->name, "X-ObjectID") == 0) {
+			fs_default_set_metadata(&file->file,
+							FS_METADATA_OBJECTID, field->value);
 		}
 	}
 
@@ -312,7 +367,6 @@ fs_http_response_callback(const struct http_response *response,
 		str_append_data(file->response_data, data, size);
 		i_stream_skip(response->payload, size);
 	}
-	// TODO: set Object ID from PUT response headers or json
 
 	if (file->callback != NULL) {
 		file->callback(file->callback_ctx);
@@ -336,7 +390,7 @@ static int fs_http_open_for_read(struct fs_file *_file)
 	file->request = http_client_request_url(fs_http_client,
 			"GET", file->url, fs_http_response_callback, file);
 
-	fs_http_add_dovecot_headers(_file);
+	fs_http_add_trace_headers(_file);
 	http_client_request_submit(file->request);
 
 	return 0;
@@ -432,7 +486,7 @@ static int fs_http_write_stream_finish(struct fs_file *_file, bool success)
 		file->response_status = 0;
 		file->request = http_client_request_url(fs_http_client,
 			"PUT", file->url, fs_http_response_callback, file);
-		fs_http_add_dovecot_headers(_file);
+		fs_http_add_trace_headers(_file);
 		fs_http_add_metadata_headers(_file);
 		// TODO: maybe implement 100 Continue
 		http_client_request_set_payload_data(file->request,
@@ -470,13 +524,14 @@ static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 
 	i_assert(_file->output == NULL);
 
-	if (file->request == NULL) {
+	/* Fire request if we don't know size or request is not created */
+	if (file->st->st_size == 0 && file->request == NULL) {
 		FUNC_IN();
 		file->response_status = 0;
 		file->request = http_client_request_url(fs_http_client,
 				"HEAD", file->url, fs_http_response_callback, file);
 		FUNC_IN();
-		fs_http_add_dovecot_headers(_file);
+		fs_http_add_trace_headers(_file);
 		FUNC_IN();
 		http_client_request_submit(file->request);
 	}
@@ -488,12 +543,10 @@ static int fs_http_stat(struct fs_file *_file, struct stat *st_r)
 			return -1;
 		}
 		/* block */
-		FUNC_IN();
 		http_client_wait(fs_http_client);
 	}
 
 	if (file->response_status / 100 != 2) {
-		FUNC_IN();
 		ret = -1;
 		fs_set_error(_file->event, EIO, "HEAD %s returned status %d",
 				file->url->path, file->response_status);
@@ -517,7 +570,7 @@ static int fs_http_delete(struct fs_file *_file)
 		file->response_status = 0;
 		file->request = http_client_request_url(fs_http_client,
 				"DELETE", file->url, fs_http_response_callback, file);
-		fs_http_add_dovecot_headers(_file);
+		fs_http_add_trace_headers(_file);
 		http_client_request_submit(file->request);
 	}
 
