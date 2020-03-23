@@ -107,6 +107,7 @@ shlibs = \
 	index/dbox-multi/libstorage_dbox_multi.la \
 	index/dbox-single/libstorage_dbox_single.la \
 	index/dbox-common/libstorage_dbox_common.la \
+	index/abox/libstorage_abox.la \
 	index/maildir/libstorage_maildir.la \
 	index/mbox/libstorage_mbox.la \
 	index/cydir/libstorage_cydir.la \

@@ -1,0 +1,3 @@
+
+Mar 23 08:37:59 master: Warning: fd limit (ulimit -n) is lower than required under max. load (256 < 1000), because of default_client_limit
+Mar 23 08:37:59 master: Info: Dovecot v2.4.devel (f52869c37) starting up for imap, pop3, lmtp (core dumps disabled)

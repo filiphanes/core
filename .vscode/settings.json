@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "*.gradle": "gradle",
+        "*.svelte": "svelte",
+        "fs-api.h": "c"
+    }
+}
