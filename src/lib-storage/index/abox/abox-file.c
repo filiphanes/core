@@ -3,18 +3,41 @@
 #include "lib.h"
 #include "eacces-error.h"
 #include "fdatasync-path.h"
-#include "mkdir-parents.h"
 #include "istream.h"
 #include "ostream.h"
 #include "str.h"
 #include "fs-api.h"
 #include "fs-api-private.h"
-#include "dbox-attachment.h"
 #include "abox-storage.h"
 #include "abox-file.h"
 
 #include <stdio.h>
 #include <utime.h>
+
+#define ABOX_READ_BLOCK_SIZE IO_BLOCK_SIZE
+
+void abox_file_set_corrupted(struct abox_file *file, const char *reason, ...)
+{
+	FUNC_START();
+	va_list args;
+
+	va_start(args, reason);
+	mail_storage_set_critical(&file->storage->storage,
+		"Corrupted abox file %s (around offset=%"PRIuUOFF_T"): %s",
+		file->cur_path, file->input == NULL ? 0 : file->input->v_offset,
+		t_strdup_vprintf(reason, args));
+	va_end(args);
+
+	abox_set_mailbox_corrupted(&file->mbox->box);
+}
+
+void abox_file_set_syscall_error(struct abox_file *file, const char *function)
+{
+	FUNC_START();
+	mail_storage_set_critical(&file->storage->storage,
+				  "%s failed for file %s: %m",
+				  function, file->cur_path);
+}
 
 char *abox_file_make_path(struct abox_file *file, const char *fname)
 {
@@ -25,14 +48,14 @@ char *abox_file_make_path(struct abox_file *file, const char *fname)
 		fname);
 }
 
-struct dbox_file *abox_file_init(struct abox_mailbox *mbox, guid_128_t guid)
+struct abox_file *abox_file_init(struct abox_mailbox *mbox, guid_128_t guid)
 {
 	FUNC_START();
 	struct abox_file *file;
 	const char *fname;
 
 	file = i_new(struct abox_file, 1);
-	file->file.storage = &mbox->storage->storage;
+	file->storage = mbox->storage;
 	file->mbox = mbox;
 	T_BEGIN {
 		if (guid_128_is_empty(guid)) {
@@ -43,350 +66,306 @@ struct dbox_file *abox_file_init(struct abox_mailbox *mbox, guid_128_t guid)
 		}
 
 		fname = guid_128_to_string(file->guid);
-		i_free(file->file.primary_path);
-		file->file.cur_path =
-			file->file.primary_path =
+		i_free(file->primary_path);
+		file->cur_path =
+			file->primary_path =
 				abox_file_make_path(file, fname);
 	} T_END;
-	dbox_file_init(&file->file);
-	return &file->file;
+
+	file->refcount = 1;
+	file->fs_file = fs_file_init(file->storage->mail_fs,
+								 file->primary_path, FS_OPEN_MODE_REPLACE);
+	if (file->fs_file == NULL) {
+		mailbox_set_critical(&mbox->box,
+			"fs_file_init(%s, FS_OPEN_MODE_REPLACE) failed: %m",
+			file->primary_path);
+	}
+	file->cur_offset = (uoff_t)-1;
+	file->cur_path = file->primary_path;
+
+	return file;
 }
 
-void abox_file_free(struct dbox_file *file)
+int abox_file_open(struct abox_file *file, bool *notfound_r)
 {
 	FUNC_START();
-	struct abox_file *sfile = (struct abox_file *)file;
 
-	pool_unref(&sfile->attachment_pool);
-	dbox_file_free(file);
-}
+	*notfound_r = FALSE;
+	if (file->input != NULL)
+		return 1;
 
-int abox_file_get_attachments(struct dbox_file *file, const char **extrefs_r)
-{
-	FUNC_START();
-	const char *line;
-	bool deleted;
-	int ret;
-
-	*extrefs_r = NULL;
-	return 0; /* disables attachments */
-
-	/* read the metadata */
-	ret = dbox_file_open(file, &deleted);
-	if (ret > 0) {
-		if (deleted) {
-			FUNC_END_RET_INT(0);
-			return 0;
-		}
+	if (file->fs_file == NULL) {
+		T_BEGIN {
+			file->fs_file = fs_file_init(file->storage->mail_fs,
+								file->primary_path, FS_OPEN_MODE_REPLACE);
+		} T_END;
 	}
-	if (ret <= 0) {
-		if (ret < 0) {
-			FUNC_END_RET_INT(-1);
-			return -1;
-		}
-		/* corrupted file. we're deleting it anyway. */
-		line = NULL;
-	} else {
-		line = dbox_file_metadata_get(file, DBOX_METADATA_EXT_REF);
-	}
-	if (line == NULL) {
-		/* no attachments */
-		FUNC_END_RET_INT(0);
-		return 0;
-	}
-	*extrefs_r = line;
-	FUNC_END_RET_INT(1);
+
+	file->input = fs_read_stream(file->fs_file, ABOX_READ_BLOCK_SIZE);
+	/* TODO: *notfound_r = TRUE; */
 	return 1;
 }
 
-const char *
-abox_file_attachment_relpath(struct abox_file *file, const char *srcpath)
+int abox_file_stat(struct abox_file *file, struct stat *st_r)
 {
 	FUNC_START();
-	const char *p;
 
-	p = strchr(srcpath, '-');
-	if (p == NULL) {
-		mailbox_set_critical(&file->mbox->box,
-			"abox attachment path in invalid format: %s", srcpath);
-	} else {
-		p = strchr(p+1, '-');
-	}
-	return t_strdup_printf("%s-%s-%u",
-			p == NULL ? srcpath : t_strdup_until(srcpath, p),
-			guid_128_to_string(file->mbox->mailbox_guid),
-			file->uid);
-}
-
-static int abox_file_rename_attachments(struct abox_file *file)
-{
-	FUNC_START();
-	struct dbox_storage *storage = file->file.storage;
-	struct fs_file *src_file, *dest_file;
-	const char *const *pathp, *src, *dest;
-	int ret = 0;
-
-	array_foreach(&file->attachment_paths, pathp) T_BEGIN {
-		src = t_strdup_printf("%s/%s", storage->attachment_dir, *pathp);
-		dest = t_strdup_printf("%s/%s", storage->attachment_dir,
-				abox_file_attachment_relpath(file, *pathp));
-		src_file = fs_file_init(storage->attachment_fs, src,
-					FS_OPEN_MODE_READONLY);
-		dest_file = fs_file_init(storage->attachment_fs, dest,
-					FS_OPEN_MODE_READONLY);
-		if (fs_rename(src_file, dest_file) < 0) {
-			mailbox_set_critical(&file->mbox->box, "%s",
-				fs_file_last_error(dest_file));
-			ret = -1;
-		}
-		fs_file_deinit(&src_file);
-		fs_file_deinit(&dest_file);
-	} T_END;
-	return ret;
-}
-
-/*
-int abox_file_assign_uid(struct abox_file *file, uint32_t uid)
-{
-	FUNC_START();
-	struct dbox_file *_file = &file->file;
-	struct fs_file *old_file;
-	struct fs_file *new_file;
-	i_assert(file->uid == 0);
-	i_assert(uid != 0);
-
-	old_file = file->file.fs_file;
-	// TODO: use abox_file_make_path
-	abox_file_init_paths(file, t_strdup_printf(ABOX_MAIL_FILE_FORMAT, uid));
-	FUNC_IN();
-	new_file = fs_file_init(file->mbox->storage->storage.mail_fs,
-					file->file.primary_path, FS_OPEN_MODE_REPLACE);
-
-	FUNC_IN();
-	if (fs_exists(new_file) > 0) {
-		// TODO: catch error when fs_exists returns -1
-		mailbox_set_critical(&file->mbox->box,
-			"abox: %s already exists, rebuilding index",
-			_file->primary_path);
-		abox_set_mailbox_corrupted(&file->mbox->box);
-		return -1;
-	}
-	FUNC_IN();
-	if (fs_rename(old_file, new_file) < 0) {
-		mailbox_set_critical(&file->mbox->box,
-				     "fs_rename(%s, %s) failed: %m",
-				     fs_file_path(old_file),
-				     fs_file_path(new_file));
-		return -1;
-	}
-	FUNC_IN();
-	fs_file_deinit(&new_file);
-	FUNC_IN();
-	dbox_file_close(_file);
-	FUNC_IN();
-	file->uid = uid;
-
-	if (array_is_created(&file->attachment_paths)) {
-		if (abox_file_rename_attachments(file) < 0)
+	if (abox_file_is_open(file)) {
+		if (fs_stat(file->fs_file, st_r) < 0) {
+			mail_storage_set_critical(&file->storage->storage,
+				"fstat(%s) failed: %m", file->cur_path);
 			return -1;
+		}
+		return 0;
 	}
+
+	file->fs_file = fs_file_init(file->storage->mail_fs,
+							file->primary_path, FS_OPEN_MODE_READONLY);
+	if (fs_stat(file->fs_file, st_r) < 0) {
+		FUNC_IN();
+		if (errno != ENOENT) {
+			mail_storage_set_critical(&file->storage->storage,
+						  "fs_stat(%s) failed: %m", file->primary_path);
+			return -1;
+		}
+	}
+	fs_file_deinit(&file->fs_file);
+
 	return 0;
 }
-*/
 
-static int abox_file_unlink_aborted_save_attachments(struct abox_file *file)
+void abox_file_unlock(struct abox_file *file)
 {
 	FUNC_START();
-	struct dbox_storage *storage = file->file.storage;
-	struct fs *fs = storage->attachment_fs;
-	struct fs_file *fs_file;
-	const char *const *pathp, *path;
-	int ret = 0;
+	i_assert(!file->appending || file->fs_lock == NULL);
 
-	array_foreach(&file->attachment_paths, pathp) T_BEGIN {
-		/* we don't know if we aborted before renaming this attachment,
-		   so try deleting both source and dest path. the source paths
-		   point to temporary files (not to source messages'
-		   attachment paths), so it's safe to delete them. */
-		path = t_strdup_printf("%s/%s", storage->attachment_dir,
-				       *pathp);
-		fs_file = fs_file_init(fs, path, FS_OPEN_MODE_READONLY);
-		if (fs_delete(fs_file) < 0 &&
-		    errno != ENOENT) {
-			mailbox_set_critical(&file->mbox->box, "%s",
-					     fs_file_last_error(fs_file));
-			ret = -1;
-		}
-		fs_file_deinit(&fs_file);
+	if (file->fs_lock != NULL)
+		fs_unlock(&file->fs_lock);
 
-		path = t_strdup_printf("%s/%s", storage->attachment_dir,
-				abox_file_attachment_relpath(file, *pathp));
-		fs_file = fs_file_init(fs, path, FS_OPEN_MODE_READONLY);
-		if (fs_delete(fs_file) < 0 &&
-		    errno != ENOENT) {
-			mailbox_set_critical(&file->mbox->box, "%s",
-					     fs_file_last_error(fs_file));
-			ret = -1;
-		}
-		fs_file_deinit(&fs_file);
-	} T_END;
-	return ret;
+	if (file->input != NULL)
+		i_stream_sync(file->input);
 }
 
-int abox_file_unlink_aborted_save(struct dbox_file *file)
+void abox_file_close(struct abox_file *file)
 {
 	FUNC_START();
-	struct abox_file *sfile = container_of(file, struct abox_file, file);
+	abox_file_unlock(file);
+	fs_file_deinit(&file->fs_file);
+	file->cur_offset = (uoff_t)-1;
+}
+
+void abox_file_free(struct abox_file *file)
+{
+	FUNC_START();
+
+	i_assert(file->refcount == 0);
+
+	pool_unref(&file->metadata_pool);
+	abox_file_close(file);
+	i_free(file->primary_path);
+	i_free(file->alt_path);
+	i_free(file);
+}
+
+void abox_file_unref(struct abox_file **_file)
+{
+	FUNC_START();
+	struct abox_file *file = *_file;
+
+	*_file = NULL;
+
+	i_assert(file->refcount > 0);
+	if (--file->refcount == 0)
+		abox_file_free(file);
+}
+
+int abox_file_unlink_aborted_save(struct abox_file *file)
+{
+	FUNC_START();
 	int ret = 0;
 
 	i_assert(file->fs_file != NULL);
 
 	if (fs_delete(file->fs_file) < 0) {
-		mailbox_set_critical(&sfile->mbox->box,
+		mailbox_set_critical(&file->mbox->box,
 			"fs_delete(%s) failed: %m", file->cur_path);
 		ret = -1;
 	}
-	/*
-	if (array_is_created(&sfile->attachment_paths)) {
-		if (abox_file_unlink_aborted_save_attachments(file) < 0)
-			ret = -1;
-	}
-	*/
 	FUNC_END_RET_INT(ret);
 	return ret;
 }
 
-struct fs_file *
-abox_file_init_fs_file(struct dbox_file *file, const char *path, bool parents)
+int abox_file_unlink(struct abox_file *file)
 {
 	FUNC_START();
-	struct abox_file *sfile = container_of(file, struct abox_file, file);
-	struct mailbox *box = &sfile->mbox->box;
-	struct fs_file *fs_file;
+	i_assert(file->fs_file != NULL);
 
-	fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_REPLACE);
-	if (fs_file == NULL) {
-		mailbox_set_critical(box, "fs_file_init(%s, FS_OPEN_MODE_REPLACE) failed: %m", path);
+	if (fs_delete(file->fs_file) < 0) {
+		mail_storage_set_critical(&file->storage->storage,
+			"fs_delete(%s) failed: %m", file->primary_path);
+		FUNC_END_RET_INT(-1);
+		return -1;
 	}
-	return fs_file;
+	FUNC_END_RET_INT(1);
+	return 1;
 }
 
-int abox_file_move(struct dbox_file *file, bool alt_path)
+int abox_file_seek(struct abox_file *file, uoff_t offset)
 {
 	FUNC_START();
-	struct mail_storage *storage = &file->storage->storage;
-	struct ostream *output;
-	const char *dest_dir, *temp_path, *dest_path, *p;
 	struct stat st;
-	bool deleted;
-	struct fs_file *out_file;
-	struct fs_file *dest_file;
-	int ret = 0;
 
 	i_assert(file->input != NULL);
 
-	if (dbox_file_is_in_alt(file) == alt_path)
+	if (offset == 0)
+		offset = file->file_header_size;
+
+	if (offset != file->cur_offset) {
+		fs_stat(file->fs_file, &st);
+		file->cur_offset = offset;
+		file->cur_physical_size = st.st_size;
+	}
+	i_stream_seek(file->input, offset + file->msg_header_size);
+	return 1;
+}
+
+struct abox_file_append_context *abox_file_append_init(struct abox_file *file)
+{
+	FUNC_START();
+	struct abox_file_append_context *ctx;
+
+	i_assert(!file->appending);
+
+	file->appending = TRUE;
+
+	ctx = i_new(struct abox_file_append_context, 1);
+	ctx->file = file;
+	if (file->fs_file != NULL) {
+		FUNC_IN();
+		ctx->output = fs_write_stream(file->fs_file);
+	}
+	return ctx;
+}
+
+int abox_file_append_commit(struct abox_file_append_context **_ctx)
+{
+	FUNC_START();
+	struct abox_file_append_context *ctx = *_ctx;
+	int ret;
+
+	i_assert(ctx->file->appending);
+
+	*_ctx = NULL;
+
+	ret = fs_write_stream_finish(ctx->file->fs_file, &ctx->output);
+	ctx->file->appending = FALSE;
+	i_free(ctx);
+	return ret;
+}
+
+void abox_file_append_rollback(struct abox_file_append_context **_ctx)
+{
+	FUNC_START();
+	struct abox_file_append_context *ctx = *_ctx;
+	struct abox_file *file = ctx->file;
+	bool close_file = FALSE;
+
+	i_assert(ctx->file->appending);
+
+	*_ctx = NULL;
+	if (ctx->first_append_offset == 0) {
+		/* nothing changed */
+	} else if (ctx->first_append_offset == file->file_header_size) {
+		/* rolling back everything */
+		if (fs_delete(file->fs_file) < 0)
+			abox_file_set_syscall_error(file, "fs_delete()");
+		close_file = TRUE;
+	}
+	fs_write_stream_abort_error(file->fs_file, &ctx->output, "rollback");
+	i_free(ctx);
+
+	if (close_file)
+		abox_file_close(file);
+	file->appending = FALSE;
+}
+
+int abox_file_append_flush(struct abox_file_append_context *ctx)
+{
+	FUNC_START();
+	if (ctx->last_flush_offset == ctx->output->offset &&
+	    ctx->last_checkpoint_offset == ctx->output->offset)
 		return 0;
-	if (file->alt_path == NULL)
-		return 0;
 
-	if (stat(file->cur_path, &st) < 0 && errno == ENOENT) {
-		/* already expunged/moved by another session */
-		return 0;
-	}
-
-	dest_path = !alt_path ? file->primary_path : file->alt_path;
-
-	i_assert(dest_path != NULL);
-
-	p = strrchr(dest_path, '/');
-	i_assert(p != NULL);
-	dest_dir = t_strdup_until(dest_path, p);
-	temp_path = t_strdup_printf("%s/%s", dest_dir,
-				    dbox_generate_tmp_filename());
-
-	/* first copy the file. make sure to catch every possible error
-	   since we really don't want to break the file. */
-	out_file = file->storage->v.file_init_fs_file(file, dest_path, TRUE);
-	if (out_file == NULL)
-		return -1;
-
-	output = fs_write_stream(out_file);
-	i_stream_seek(file->input, 0);
-	o_stream_nsend_istream(output, file->input);
-	if (fs_write_stream_finish(file->fs_file, &output) < 0) {
-		mail_storage_set_critical(storage, "write(%s) failed: %s",
-			temp_path, o_stream_get_error(output));
-		ret = -1;
-	}
-
-	fs_file_deinit(&dest_file);
-	if (fs_delete(file->fs_file) < 0) {
-		dbox_file_set_syscall_error(file, "fs_delete()");
-		/* who knows what happened to the file. keep both just to be
-		   sure both won't get deleted. */
+	if (fs_write_stream_finish(ctx->file->fs_file, &ctx->output) < 0)
+	{
+		abox_file_set_syscall_error(ctx->file, "fs_write_stream_finish()");
 		return -1;
 	}
 
-	/* file was successfully moved - reopen it */
-	dbox_file_close(file);
-	if (dbox_file_open(file, &deleted) <= 0) {
-		mail_storage_set_critical(storage,
-			"dbox_file_move(%s): reopening file failed", dest_path);
-		return -1;
-	}
+	ctx->last_flush_offset = ctx->output->offset;
 	return 0;
 }
 
-static int
-abox_unlink_attachments(struct abox_file *sfile,
-			 const ARRAY_TYPE(mail_attachment_extref) *extrefs)
+void abox_file_append_checkpoint(struct abox_file_append_context *ctx)
 {
-	FUNC_START();
-	struct dbox_storage *storage = sfile->file.storage;
-	const struct mail_attachment_extref *extref;
-	const char *path;
-	int ret = 0;
-
-	array_foreach(extrefs, extref) T_BEGIN {
-		path = abox_file_attachment_relpath(sfile, extref->path);
-		if (index_attachment_delete(&storage->storage,
-					    storage->attachment_fs, path) < 0)
-			ret = -1;
-	} T_END;
-	return ret;
+	ctx->last_checkpoint_offset = ctx->output->offset;
 }
 
-int abox_file_unlink_with_attachments(struct abox_file *sfile)
+int abox_file_get_append_stream(struct abox_file_append_context *ctx,
+				struct ostream **output_r)
 {
 	FUNC_START();
-	ARRAY_TYPE(mail_attachment_extref) extrefs;
-	const char *extrefs_line;
-	pool_t pool;
-	int ret;
+	struct abox_file *file = ctx->file;
+	struct stat st;
 
-	ret = abox_file_get_attachments(&sfile->file, &extrefs_line);
-	FUNC_IN();
-	if (ret < 0)
+	if (ctx->output == NULL) {
+		/* file creation had failed */
+		FUNC_END_RET_INT(-1);
 		return -1;
-	if (ret == 0) {
-		/* no attachments */
-		return dbox_file_unlink(&sfile->file);
-	}
-	FUNC_IN();
-
-	pool = pool_alloconly_create("abox attachments unlink", 1024);
-	p_array_init(&extrefs, pool, 16);
-	if (!index_attachment_parse_extrefs(extrefs_line, pool, &extrefs)) {
-		i_warning("%s: Ignoring corrupted extref: %s",
-			  sfile->file.cur_path, extrefs_line);
-		array_clear(&extrefs);
 	}
 
-	/* try to delete the file first, so if it fails we don't have
-	   missing attachments */
-	if ((ret = dbox_file_unlink(&sfile->file)) >= 0)
-		(void)abox_unlink_attachments(sfile, &extrefs);
-	pool_unref(&pool);
-	return ret;
+	*output_r = ctx->output;
+	FUNC_END_RET_INT(1);
+	return 1;
 }
+
+const char *abox_file_metadata_get(struct abox_file *file, const char * key)
+{
+	FUNC_START();
+	const char *value = NULL;
+	struct stat st;
+
+	fs_lookup_metadata(file->fs_file, key, &value);
+
+	if (value == NULL) {
+		if (strcmp(ABOX_METADATA_VIRTUAL_SIZE, key) == 0 &&
+			fs_stat(file->fs_file, &st) >= 0) {
+			value = i_strdup_printf("%llu", st.st_size);
+		}
+	}
+	FUNC_END_RET(value);
+	return value;
+}
+
+uoff_t abox_file_get_plaintext_size(struct abox_file *file)
+{
+	FUNC_START();
+	const char *value;
+	uintmax_t size;
+	struct stat st;
+
+	/* see if we have it in metadata */
+	value = abox_file_metadata_get(file, ABOX_METADATA_PHYSICAL_SIZE);
+	if (value == NULL ||
+	    str_to_uintmax(value, &size) < 0 ||
+	    size > (uoff_t)-1) {
+		FUNC_IN();
+		/* no. that means we can use the size from fs_stat */
+		if (fs_stat(file->fs_file, &st) < 0) {
+			i_error("");
+		}
+		return (uoff_t)st.st_size;
+	}
+	return (uoff_t)size;
+}
+

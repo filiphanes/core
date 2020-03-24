@@ -1,7 +1,6 @@
 /* Copyright (c) 2007-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
-#include "dbox-attachment.h"
 #include "abox-storage.h"
 #include "abox-file.h"
 #include "abox-sync.h"
@@ -9,37 +8,11 @@
 
 #define ABOX_REBUILD_COUNT 3
 
-static void
-dbox_sync_file_move_if_needed(struct dbox_file *file,
-			      enum abox_sync_entry_type type)
-{
-	FUNC_START();
-	struct stat st;
-	bool move_to_alt = type == ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT;
-	bool deleted;
-
-	if (move_to_alt == dbox_file_is_in_alt(file) &&
-	    !move_to_alt) {
-		/* unopened dbox files default to primary dir.
-		   stat the file to update its location. */
-		(void)dbox_file_stat(file, &st);
-
-	}
-	if (move_to_alt != dbox_file_is_in_alt(file)) {
-		/* move the file. if it fails, nothing broke so
-		   don't worry about it. */
-		if (dbox_file_open(file, &deleted) > 0 && !deleted)
-			(void)abox_file_move(file, move_to_alt);
-	}
-}
-
 static void abox_sync_file(struct abox_sync_context *ctx,
 			    uint32_t seq, uint32_t uid,
 			    enum abox_sync_entry_type type)
 {
 	FUNC_START();
-	// struct dbox_file *file;
-	enum modify_type modify_type;
 
 	switch (type) {
 	case ABOX_SYNC_ENTRY_TYPE_EXPUNGE:
@@ -50,18 +23,6 @@ static void abox_sync_file(struct abox_sync_context *ctx,
 		break;
 	case ABOX_SYNC_ENTRY_TYPE_MOVE_FROM_ALT:
 	case ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT:
-		/* update flags in the sync transaction, mainly to make
-		   sure that these alt changes get marked as synced
-		   and won't be retried */
-	/* TODO: don't use alt storage
-		modify_type = type == ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT ?
-			MODIFY_ADD : MODIFY_REMOVE;
-		mail_index_update_flags(ctx->trans, seq, modify_type,
-					(enum mail_flags)DBOX_INDEX_FLAG_ALT);
-		file = abox_file_init(ctx->mbox, uid);
-		dbox_sync_file_move_if_needed(file, type);
-		dbox_file_unref(&file);
-	*/
 		break;
 	}
 }
@@ -78,13 +39,8 @@ static void abox_sync_add(struct abox_sync_context *ctx,
 		/* we're interested */
 		type = ABOX_SYNC_ENTRY_TYPE_EXPUNGE;
 	} else if (sync_rec->type == MAIL_INDEX_SYNC_TYPE_FLAGS) {
-		/* we care only about alt flag changes */
-		if ((sync_rec->add_flags & DBOX_INDEX_FLAG_ALT) != 0)
-			type = ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT;
-		else if ((sync_rec->remove_flags & DBOX_INDEX_FLAG_ALT) != 0)
-			type = ABOX_SYNC_ENTRY_TYPE_MOVE_FROM_ALT;
-		else
-			return;
+		/* not interested */
+		return;
 	} else {
 		/* not interested */
 		return;
@@ -138,13 +94,12 @@ static int abox_sync_index(struct abox_sync_context *ctx)
 	return 1;
 }
 
-static void dbox_sync_file_expunge(struct abox_sync_context *ctx,
+static void abox_sync_file_expunge(struct abox_sync_context *ctx,
 				   uint32_t uid)
 {
 	FUNC_START();
 	struct mailbox *box = &ctx->mbox->box;
-	struct dbox_file *file;
-	struct abox_file *sfile;
+	struct abox_file *file;
 	const void *guid;
 	uint32_t seq;
 	int ret;
@@ -154,21 +109,17 @@ static void dbox_sync_file_expunge(struct abox_sync_context *ctx,
 						  ctx->mbox->guid_ext_id, &guid, NULL);
 
 	file = abox_file_init(ctx->mbox, guid);
-	sfile = (struct abox_file *)file;
-	if (file->storage->attachment_dir != NULL)
-		ret = abox_file_unlink_with_attachments(sfile);
-	else
-		ret = dbox_file_unlink(file);
+	ret = abox_file_unlink(file);
 
 	/* do sync_notify only when the file was unlinked by us */
 	if (ret > 0 && box->v.sync_notify != NULL)
 		box->v.sync_notify(box, uid, MAILBOX_SYNC_TYPE_EXPUNGE);
 	FUNC_IN();
-	dbox_file_unref(&file);
+	abox_file_unref(&file);
 	FUNC_END();
 }
 
-static void dbox_sync_expunge_files(struct abox_sync_context *ctx)
+static void abox_sync_expunge_files(struct abox_sync_context *ctx)
 {
 	FUNC_START();
 	const uint32_t *uidp;
@@ -177,7 +128,7 @@ static void dbox_sync_expunge_files(struct abox_sync_context *ctx)
 	   the files at the same time. */
 	ctx->mbox->box.tmp_sync_view = ctx->sync_view;
 	array_foreach(&ctx->expunged_uids, uidp) T_BEGIN {
-		dbox_sync_file_expunge(ctx, *uidp);
+		abox_sync_file_expunge(ctx, *uidp);
 	} T_END;
 	if (ctx->mbox->box.v.sync_notify != NULL)
 		ctx->mbox->box.v.sync_notify(&ctx->mbox->box, 0, 0);
@@ -297,7 +248,7 @@ int abox_sync_finish(struct abox_sync_context **_ctx, bool success)
 			mailbox_set_index_error(&ctx->mbox->box);
 			ret = -1;
 		} else {
-			dbox_sync_expunge_files(ctx);
+			abox_sync_expunge_files(ctx);
 			mail_index_view_close(&ctx->sync_view);
 		}
 	} else {

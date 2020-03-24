@@ -12,8 +12,8 @@ enum abox_sync_flags {
 
 enum abox_sync_entry_type {
 	ABOX_SYNC_ENTRY_TYPE_EXPUNGE,
-	ABOX_SYNC_ENTRY_TYPE_MOVE_FROM_ALT,
-	ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT
+	ABOX_SYNC_ENTRY_TYPE_MOVE_FROM_ALT, /* not used */
+	ABOX_SYNC_ENTRY_TYPE_MOVE_TO_ALT    /* not used */
 };
 
 struct abox_sync_context {

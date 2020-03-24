@@ -1,21 +1,23 @@
 /* Copyright (c) 2007-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
+#include "ioloop.h"
 #include "fs-api.h"
 #include "master-service.h"
 #include "mail-index-modseq.h"
 #include "mail-search-build.h"
 #include "mailbox-list-private.h"
+#include "mailbox-uidvalidity.h"
+#include "unlink-old-files.h"
 #include "index-pop3-uidl.h"
-#include "dbox-mail.h"
-#include "dbox-save.h"
+#include "abox-mail.h"
+#include "abox-save.h"
 #include "abox-file.h"
 #include "abox-sync.h"
 #include "abox-storage.h"
 
-extern struct mail_storage dbox_storage, abox_storage;
+extern struct mail_storage abox_storage;
 extern struct mailbox abox_mailbox;
-extern struct dbox_storage_vfuncs abox_dbox_storage_vfuncs;
 
 static struct event_category event_category_abox = {
 	.name = "abox",
@@ -30,10 +32,9 @@ static struct mail_storage *abox_storage_alloc(void)
 
 	pool = pool_alloconly_create("abox storage", 512+256);
 	storage = p_new(pool, struct abox_storage, 1);
-	storage->storage.v = abox_dbox_storage_vfuncs;
-	storage->storage.storage = abox_storage;
-	storage->storage.storage.pool = pool;
-	return &storage->storage.storage;
+	storage->storage = abox_storage;
+	storage->storage.pool = pool;
+	return &storage->storage;
 }
 
 static int abox_storage_create(struct mail_storage *_storage,
@@ -41,21 +42,38 @@ static int abox_storage_create(struct mail_storage *_storage,
 				const char **error_r)
 {
 	FUNC_START();
-	struct dbox_storage *storage = DBOX_STORAGE(_storage);
-	enum fs_properties props;
+	struct abox_storage *storage = ABOX_STORAGE(_storage);
+	// enum fs_properties props;
+	const struct mail_storage_settings *set = _storage->set;
+	const char *error;
+	const char *name, *args;
 
-	if (dbox_storage_create(_storage, ns, error_r) < 0)
-		return -1;
+	if (*set->mail_fs != '\0') {
+		args = strpbrk(set->mail_fs, ": ");
+		if (args == NULL) {
+			name = set->mail_fs;
+			args = "";
+		} else {
+			name = t_strdup_until(set->mail_fs, args++);
+		}
 
-	if (storage->attachment_fs != NULL) {
-		props = fs_get_properties(storage->attachment_fs);
-		if ((props & FS_PROPERTY_RENAME) == 0) {
-			*error_r = "mail_attachment_fs: "
-				"Backend doesn't support renaming";
+		if (mailbox_list_init_fs(ns->list, name, args,
+					 storage->mail_dir,
+					 &storage->mail_fs, &error) < 0) {
+			*error_r = t_strdup_printf("mail_fs: %s", error);
 			return -1;
 		}
 	}
+
 	return 0;
+}
+
+void abox_storage_destroy(struct mail_storage *_storage)
+{
+	struct abox_storage *storage = ABOX_STORAGE(_storage);
+
+	fs_deinit(&storage->mail_fs);
+	index_storage_destroy(_storage);
 }
 
 static const char *
@@ -79,6 +97,19 @@ abox_storage_find_root_dir(const struct mail_namespace *ns)
 	return NULL;
 }
 
+void abox_storage_get_list_settings(const struct mail_namespace *ns ATTR_UNUSED,
+				    struct mailbox_list_settings *set)
+{
+	if (set->layout == NULL)
+		set->layout = MAILBOX_LIST_NAME_FS;
+	if (set->subscription_fname == NULL)
+		set->subscription_fname = ABOX_SUBSCRIPTION_FILE_NAME;
+	if (*set->maildir_name == '\0')
+		set->maildir_name = ABOX_MAILDIR_NAME;
+	if (*set->mailbox_dir_name == '\0')
+		set->mailbox_dir_name = ABOX_MAILBOX_DIR_NAME;
+}
+
 static bool abox_storage_autodetect(const struct mail_namespace *ns,
 				     struct mailbox_list_settings *set)
 {
@@ -98,9 +129,8 @@ static bool abox_storage_autodetect(const struct mail_namespace *ns,
 		}
 	}
 
-	/* NOTE: this check works for mdbox as well. we'll rely on the
-	   autodetect ordering to catch mdbox before we get here. */
-	path = t_strconcat(root_dir, "/"DBOX_MAILBOX_DIR_NAME, NULL);
+	/* TODO: maybe use fs-api */
+	path = t_strconcat(root_dir, "/"ABOX_MAILBOX_DIR_NAME, NULL);
 	if (stat(path, &st) < 0) {
 		if (debug)
 			i_debug("abox autodetect: stat(%s) failed: %m", path);
@@ -114,7 +144,15 @@ static bool abox_storage_autodetect(const struct mail_namespace *ns,
 	}
 
 	set->root_dir = root_dir;
-	dbox_storage_get_list_settings(ns, set);
+	if (set->layout == NULL)
+		set->layout = MAILBOX_LIST_NAME_FS;
+	if (set->subscription_fname == NULL)
+		set->subscription_fname = ABOX_SUBSCRIPTION_FILE_NAME;
+	if (*set->maildir_name == '\0')
+		set->maildir_name = ABOX_MAILDIR_NAME;
+	if (*set->mailbox_dir_name == '\0')
+		set->mailbox_dir_name = ABOX_MAILBOX_DIR_NAME;
+
 	return TRUE;
 }
 
@@ -127,7 +165,7 @@ abox_mailbox_alloc(struct mail_storage *storage, struct mailbox_list *list,
 	struct index_mailbox_context *ibox;
 	pool_t pool;
 
-	/* dbox can't work without index files */
+	/* abox can't work without index files */
 	flags &= ~MAILBOX_FLAG_NO_INDEX_FILES;
 
 	pool = pool_alloconly_create("abox mailbox", 1024*3);
@@ -167,7 +205,7 @@ int abox_read_header(struct abox_mailbox *mbox,
 	    (!mbox->box.creating || data_size != 0)) {
 		if (log_error) {
 			mailbox_set_critical(&mbox->box,
-				"abox: Invalid dbox header size");
+				"abox: Invalid abox header size");
 		}
 		ret = -1;
 	} else {
@@ -220,6 +258,31 @@ static void abox_update_header(struct abox_mailbox *mbox,
 	guid_128_copy(mbox->mailbox_guid, new_hdr.mailbox_guid);
 }
 
+uint32_t abox_get_uidvalidity_next(struct mailbox_list *list)
+{
+	FUNC_START();
+	const char *path;
+
+	path = mailbox_list_get_root_forced(list, MAILBOX_LIST_PATH_TYPE_CONTROL);
+	path = t_strconcat(path, "/"ABOX_UIDVALIDITY_FILE_NAME, NULL);
+	return mailbox_uidvalidity_next(list, path);
+}
+
+void abox_notify_changes(struct mailbox *box)
+{
+	const char *dir, *path;
+
+	if (box->notify_callback == NULL)
+		mailbox_watch_remove_all(box);
+	else {
+		if (mailbox_get_path_to(box, MAILBOX_LIST_PATH_TYPE_INDEX,
+					&dir) <= 0)
+			return;
+		path = t_strdup_printf("%s/"MAIL_INDEX_PREFIX".log", dir);
+		mailbox_watch_add(box, path);
+	}
+}
+
 int abox_mailbox_create_indexes(struct mailbox *box,
 				 const struct mailbox_update *update,
 				 struct mail_index_transaction *trans)
@@ -242,7 +305,7 @@ int abox_mailbox_create_indexes(struct mailbox *box,
 		uid_validity = hdr->uid_validity;
 	else {
 		/* set uidvalidity */
-		uid_validity = dbox_get_uidvalidity_next(box->list);
+		uid_validity = abox_get_uidvalidity_next(box->list);
 	}
 
 	if (hdr->uid_validity != uid_validity) {
@@ -288,17 +351,6 @@ int abox_mailbox_create_indexes(struct mailbox *box,
 	return 0;
 }
 
-static const char *
-abox_get_attachment_path_suffix(struct dbox_file *_file)
-{
-	FUNC_START();
-	struct abox_file *file = (struct abox_file *)_file;
-
-	return t_strdup_printf("-%s-%u",
-			guid_128_to_string(file->mbox->mailbox_guid),
-			file->uid);
-}
-
 void abox_set_mailbox_corrupted(struct mailbox *box)
 {
 	FUNC_START();
@@ -313,14 +365,6 @@ void abox_set_mailbox_corrupted(struct mailbox *box)
 		mbox->corrupted_rebuild_count = hdr.rebuild_count;
 }
 
-static void abox_set_file_corrupted(struct dbox_file *_file)
-{
-	FUNC_START();
-	struct abox_file *file = (struct abox_file *)_file;
-
-	abox_set_mailbox_corrupted(&file->mbox->box);
-}
-
 static int abox_mailbox_alloc_index(struct abox_mailbox *mbox)
 {
 	FUNC_START();
@@ -330,7 +374,7 @@ static int abox_mailbox_alloc_index(struct abox_mailbox *mbox)
 		return -1;
 
 	mbox->hdr_ext_id =
-		mail_index_ext_register(mbox->box.index, "dbox-hdr",
+		mail_index_ext_register(mbox->box.index, "abox-hdr",
 					sizeof(struct abox_index_header), 0, 0);
 	mbox->guid_ext_id =
 		mail_index_ext_register(mbox->box.index, "guid",
@@ -343,22 +387,125 @@ static int abox_mailbox_alloc_index(struct abox_mailbox *mbox)
 	return 0;
 }
 
+static bool
+abox_cleanup_temp_files(struct mailbox_list *list, const char *path,
+			time_t last_scan_time, time_t last_change_time)
+{
+	unsigned int interval = list->mail_set->mail_temp_scan_interval;
+
+	/* check once in a while if there are temp files to clean up */
+	if (interval == 0) {
+		/* disabled */
+		return FALSE;
+	} else if (last_scan_time >= ioloop_time - (time_t)interval) {
+		/* not the time to scan it yet */
+		return FALSE;
+	} else {
+		bool stated = FALSE;
+		if (last_change_time == (time_t)-1) {
+			/* Don't know the ctime yet - look it up. */
+			struct stat st;
+
+			if (stat(path, &st) < 0) {
+				if (errno == ENOENT)
+					i_error("stat(%s) failed: %m", path);
+				return FALSE;
+			}
+			last_change_time = st.st_ctime;
+			stated = TRUE;
+		}
+		if (last_scan_time > last_change_time + ABOX_TMP_DELETE_SECS) {
+			/* there haven't been any changes to this directory
+			   since we last checked it. If we did an extra stat(),
+			   we need to update the last_scan_time to avoid
+			   stat()ing the next time. */
+			return stated;
+		}
+		const char *prefix =
+			mailbox_list_get_global_temp_prefix(list);
+		(void)unlink_old_files(path, prefix,
+				       ioloop_time - ABOX_TMP_DELETE_SECS);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+int abox_mailbox_check_existence(struct mailbox *box, time_t *path_ctime_r)
+{
+	const char *index_path, *box_path = mailbox_get_path(box);
+	struct stat st;
+	int ret = -1;
+
+	*path_ctime_r = (time_t)-1;
+
+	if (box->list->set.iter_from_index_dir) {
+		/* Just because the index directory exists, it doesn't mean
+		   that the mailbox is selectable. Check that by seeing if
+		   dovecot.index.log exists. If it doesn't, fallback to
+		   checking for the abox-Mails in the mail root directory.
+		   So this also means that if a mailbox is \NoSelect, listing
+		   it will always do a stat() for abox-Mails in the mail root
+		   directory. That's not ideal, but this makes the behavior
+		   safer and \NoSelect mailboxes are somewhat rare. */
+		if (mailbox_get_path_to(box, MAILBOX_LIST_PATH_TYPE_INDEX,
+					&index_path) < 0)
+			return -1;
+		i_assert(index_path != NULL);
+		index_path = t_strconcat(index_path, "/", box->index_prefix,
+					 ".log", NULL);
+		ret = stat(index_path, &st);
+	}
+	if (ret < 0) {
+		ret = stat(box_path, &st);
+		if (ret == 0)
+			*path_ctime_r = st.st_ctime;
+	}
+
+	if (ret == 0) {
+		return 0;
+	} else if (errno == ENOENT || errno == ENAMETOOLONG) {
+		mail_storage_set_error(box->storage, MAIL_ERROR_NOTFOUND,
+			T_MAIL_ERR_MAILBOX_NOT_FOUND(box->vname));
+		return -1;
+	} else if (errno == EACCES) {
+		mailbox_set_critical(box, "%s",
+			mail_error_eacces_msg("stat", box_path));
+		return -1;
+	} else {
+		mailbox_set_critical(box, "stat(%s) failed: %m", box_path);
+		return -1;
+	}
+}
+
 static int abox_mailbox_open(struct mailbox *box)
 {
 	FUNC_START();
 	struct abox_mailbox *mbox = ABOX_MAILBOX(box);
 	struct abox_index_header hdr;
+	const char *box_path = mailbox_get_path(box);
 	bool need_resize;
 	time_t path_ctime;
 
-	if (dbox_mailbox_check_existence(box, &path_ctime) < 0)
+	if (abox_mailbox_check_existence(box, &path_ctime) < 0)
 		return -1;
 
 	if (abox_mailbox_alloc_index(mbox) < 0)
 		return -1;
 
-	if (dbox_mailbox_open(box, path_ctime) < 0)
+	if (index_storage_mailbox_open(box, FALSE) < 0)
 		return -1;
+
+	mail_index_set_fsync_mode(box->index,
+				  box->storage->set->parsed_fsync_mode,
+				  MAIL_INDEX_FSYNC_MASK_APPENDS |
+				  MAIL_INDEX_FSYNC_MASK_EXPUNGES);
+
+	const struct mail_index_header *_hdr = mail_index_get_header(box->view);
+	if (abox_cleanup_temp_files(box->list, box_path,
+				    _hdr->last_temp_file_scan, path_ctime)) {
+		/* temp files were scanned. update the last scan timestamp. */
+		index_mailbox_update_last_temp_file_scan(box);
+	}
 
 	if (box->creating) {
 		/* wait for mailbox creation to initialize the index */
@@ -403,16 +550,47 @@ abox_mailbox_create(struct mailbox *box,
 	struct abox_mailbox *mbox = ABOX_MAILBOX(box);
 	struct abox_index_header hdr;
 	bool need_resize;
+	struct mail_index_sync_ctx *sync_ctx;
+	struct mail_index_view *view;
+	struct mail_index_transaction *trans;
+	int ret;
 
-	if (dbox_mailbox_create(box, update, directory) < 0)
+	if ((ret = index_storage_mailbox_create(box, directory)) <= 0)
+		return ret;
+	if (mailbox_open(box) < 0)
 		return -1;
+
+	if (mail_index_get_header(box->view)->uid_validity != 0) {
+		mail_storage_set_error(box->storage, MAIL_ERROR_EXISTS,
+				       "Mailbox already exists");
+		return -1;
+	}
+
+	/* use syncing as a lock */
+	ret = mail_index_sync_begin(box->index, &sync_ctx, &view, &trans, 0);
+	if (ret <= 0) {
+		i_assert(ret != 0);
+		mailbox_set_index_error(box);
+		return -1;
+	}
+
+	if (mail_index_get_header(view)->uid_validity == 0) {
+		if (abox_mailbox_create_indexes(box, update, trans) < 0) {
+			mail_index_sync_rollback(&sync_ctx);
+			return -1;
+		}
+	}
+
+	if (mail_index_sync_commit(&sync_ctx) < 0)
+		return -1;
+
 	if (directory || !guid_128_is_empty(mbox->mailbox_guid))
 		return 0;
 
 	/* another process just created the mailbox. read the mailbox_guid. */
 	if (abox_read_header(mbox, &hdr, FALSE, &need_resize) < 0) {
 		mailbox_set_critical(box,
-			"abox: Failed to read newly created dbox header");
+			"abox: Failed to read newly created abox header");
 		return -1;
 	}
 	guid_128_copy(mbox->mailbox_guid, hdr.mailbox_guid);
@@ -437,7 +615,7 @@ abox_mailbox_get_metadata(struct mailbox *box,
 }
 
 static int
-dbox_mailbox_update(struct mailbox *box, const struct mailbox_update *update)
+abox_mailbox_update(struct mailbox *box, const struct mailbox_update *update)
 {
 	FUNC_START();
 	if (!box->opened) {
@@ -447,6 +625,19 @@ dbox_mailbox_update(struct mailbox *box, const struct mailbox_update *update)
 	if (abox_mailbox_create_indexes(box, update, NULL) < 0)
 		return -1;
 	return index_storage_mailbox_update_common(box, update);
+}
+
+bool abox_header_have_flag(struct mailbox *box, uint32_t ext_id,
+			   unsigned int flags_offset, uint8_t flag)
+{
+	const void *data;
+	size_t data_size;
+	uint8_t flags = 0;
+
+	mail_index_get_header_ext(box->view, ext_id, &data, &data_size);
+	if (flags_offset < data_size)
+		flags = *((const uint8_t *)data + flags_offset);
+	return (flags & flag) != 0;
 }
 
 struct mail_storage abox_storage = {
@@ -461,9 +652,9 @@ struct mail_storage abox_storage = {
                 NULL,
 		abox_storage_alloc,
 		abox_storage_create,
-		dbox_storage_destroy,
+		abox_storage_destroy,
 		NULL,
-		dbox_storage_get_list_settings,
+		abox_storage_get_list_settings,
 		abox_storage_autodetect,
 		abox_mailbox_alloc,
 		NULL,
@@ -480,7 +671,7 @@ struct mailbox abox_mailbox = {
 		abox_mailbox_close,
 		index_storage_mailbox_free,
 		abox_mailbox_create,
-		dbox_mailbox_update,
+		abox_mailbox_update,
 		index_storage_mailbox_delete,
 		index_storage_mailbox_rename,
 		index_storage_get_status,
@@ -497,19 +688,19 @@ struct mailbox abox_mailbox = {
 		index_mailbox_sync_next,
 		index_mailbox_sync_deinit,
 		NULL,
-		dbox_notify_changes,
+		abox_notify_changes,
 		index_transaction_begin,
 		index_transaction_commit,
 		index_transaction_rollback,
 		NULL,
-		dbox_mail_alloc,
+		abox_mail_alloc,
 		index_storage_search_init,
 		index_storage_search_deinit,
 		index_storage_search_next_nonblock,
 		index_storage_search_next_update_seq,
 		abox_save_alloc,
 		abox_save_begin,
-		dbox_save_continue,
+		abox_save_continue,
 		abox_save_finish,
 		abox_save_cancel,
 		abox_copy,
@@ -518,14 +709,4 @@ struct mailbox abox_mailbox = {
 		abox_transaction_save_rollback,
 		index_storage_is_inconsistent
 	}
-};
-
-struct dbox_storage_vfuncs abox_dbox_storage_vfuncs = {
-	abox_file_free,
-	abox_file_init_fs_file,
-	abox_mail_open,
-	abox_mailbox_create_indexes,
-	abox_get_attachment_path_suffix,
-	abox_set_mailbox_corrupted,
-	abox_set_file_corrupted
 };

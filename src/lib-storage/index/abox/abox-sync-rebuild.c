@@ -18,7 +18,7 @@ static void abox_sync_set_uidvalidity(struct index_rebuild_context *ctx)
 	/* if uidvalidity is set in the old index, use it */
 	uid_validity = mail_index_get_header(ctx->view)->uid_validity;
 	if (uid_validity == 0)
-		uid_validity = dbox_get_uidvalidity_next(ctx->box->list);
+		uid_validity = abox_get_uidvalidity_next(ctx->box->list);
 
 	mail_index_update_header(ctx->trans,
 		offsetof(struct mail_index_header, uid_validity),
@@ -27,20 +27,22 @@ static void abox_sync_set_uidvalidity(struct index_rebuild_context *ctx)
 
 static int
 abox_sync_add_file_index(struct index_rebuild_context *ctx,
-			  struct dbox_file *file, uint32_t uid, bool primary)
+			  struct abox_file *file, uint32_t uid)
 {
 	uint32_t seq;
 	bool deleted;
 	int ret;
 
-	if ((ret = dbox_file_open(file, &deleted)) > 0) {
+	if ((ret = abox_file_open(file, &deleted)) > 0) {
 		if (deleted)
 			return 0;
-		ret = dbox_file_seek(file, 0);
+		ret = abox_file_seek(file, 0);
 	}
 	if (ret == 0) {
-		if ((ret = dbox_file_fix(file, 0)) > 0)
-			ret = dbox_file_seek(file, 0);
+/* TODO: implement abox_file_fix
+		if ((ret = abox_file_fix(file, 0)) > 0)
+			ret = abox_file_seek(file, 0);
+*/
 	}
 
 	if (ret <= 0) {
@@ -48,13 +50,6 @@ abox_sync_add_file_index(struct index_rebuild_context *ctx,
 			return -1;
 
 		i_warning("abox: Skipping unfixable file: %s", file->cur_path);
-		return 0;
-	}
-
-	if (!dbox_file_is_in_alt(file) && !primary) {
-		/* we were supposed to open the file in alt storage, but it
-		   exists in primary storage as well. skip it to avoid adding
-		   it twice. */
 		return 0;
 	}
 
@@ -66,11 +61,10 @@ abox_sync_add_file_index(struct index_rebuild_context *ctx,
 }
 
 static int
-abox_sync_add_file(struct index_rebuild_context *ctx,
-		    const char *fname, bool primary)
+abox_sync_add_file(struct index_rebuild_context *ctx, const char *fname)
 {
 	struct abox_mailbox *mbox = ABOX_MAILBOX(ctx->box);
-	struct dbox_file *file;
+	struct abox_file *file;
 	const char *uidstr = NULL;
 	uint32_t uid;
 	guid_128_t guid;
@@ -83,8 +77,6 @@ abox_sync_add_file(struct index_rebuild_context *ctx,
 	}
 
 	file = abox_file_init(mbox, guid);
-	if (!primary)
-		file->cur_path = file->alt_path;
 
 	fs_lookup_metadata(file->fs_file, "UID", &uidstr);
 	if (str_to_uint32(uidstr, &uid) < 0 || uid == 0) {
@@ -92,13 +84,13 @@ abox_sync_add_file(struct index_rebuild_context *ctx,
 			  mailbox_get_path(ctx->box), fname);
 		return 0;
 	}
-	ret = abox_sync_add_file_index(ctx, file, uid, primary);
-	dbox_file_unref(&file);
+	ret = abox_sync_add_file_index(ctx, file, uid);
+	abox_file_unref(&file);
 	return ret;
 }
 
 static int abox_sync_index_rebuild_dir(struct index_rebuild_context *ctx,
-					const char *path, bool primary)
+					const char *path)
 {
 	DIR *dir;
 	struct dirent *d;
@@ -107,10 +99,6 @@ static int abox_sync_index_rebuild_dir(struct index_rebuild_context *ctx,
 	dir = opendir(path);
 	if (dir == NULL) {
 		if (errno == ENOENT) {
-			if (!primary) {
-				/* alt directory doesn't exist, ignore */
-				return 0;
-			}
 			return index_mailbox_fix_inconsistent_existence(ctx->box, path);
 		}
 		mailbox_set_critical(ctx->box, "opendir(%s) failed: %m", path);
@@ -121,7 +109,7 @@ static int abox_sync_index_rebuild_dir(struct index_rebuild_context *ctx,
 		if ((d = readdir(dir)) == NULL)
 			break;
 
-		ret = abox_sync_add_file(ctx, d->d_name, primary);
+		ret = abox_sync_add_file(ctx, d->d_name);
 	} while (ret >= 0);
 	if (errno != 0) {
 		mailbox_set_critical(ctx->box, "readdir(%s) failed: %m", path);
@@ -164,16 +152,9 @@ abox_sync_index_rebuild_singles(struct index_rebuild_context *ctx)
 		return -1;
 
 	abox_sync_set_uidvalidity(ctx);
-	if (abox_sync_index_rebuild_dir(ctx, path, TRUE) < 0) {
+	if (abox_sync_index_rebuild_dir(ctx, path) < 0) {
 		mailbox_set_critical(ctx->box, "abox: Rebuilding failed");
 		ret = -1;
-	} else if (alt_path != NULL) {
-		if (abox_sync_index_rebuild_dir(ctx, alt_path, FALSE) < 0) {
-			mailbox_set_critical(ctx->box,
-				"abox: Rebuilding failed on alt path %s",
-				alt_path);
-			ret = -1;
-		}
 	}
 	abox_sync_update_header(ctx);
 	return ret;
@@ -197,20 +178,13 @@ int abox_sync_index_rebuild(struct abox_mailbox *mbox, bool force)
 	}
 	i_warning("abox %s: Rebuilding index", mailbox_get_path(&mbox->box));
 
-	if (dbox_verify_alt_storage(mbox->box.list) < 0) {
-		mailbox_set_critical(&mbox->box,
-			"abox: Alt storage not mounted, "
-			"aborting index rebuild");
-		return -1;
-	}
-
 	view = mail_index_view_open(mbox->box.index);
 	trans = mail_index_transaction_begin(view,
 					MAIL_INDEX_TRANSACTION_FLAG_EXTERNAL);
 
 	ctx = index_index_rebuild_init(&mbox->box, view, trans);
 	ret = abox_sync_index_rebuild_singles(ctx);
-	index_index_rebuild_deinit(&ctx, dbox_get_uidvalidity_next);
+	index_index_rebuild_deinit(&ctx, abox_get_uidvalidity_next);
 
 	if (ret < 0)
 		mail_index_transaction_rollback(&trans);
