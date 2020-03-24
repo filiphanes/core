@@ -13,12 +13,10 @@
 
 #include <stdio.h>
 #include <unistd.h>
-#include <dirent.h>
-#include <fcntl.h>
 #include <sys/stat.h>
 
 #define MAX_MKDIR_RETRY_COUNT 5
-#define FS_HTTP_META_PREFIX "X-Meta-"
+#define FS_HTTP_META_PREFIX "x-amz-meta-"
 
 
 struct http_client *fs_http_client = NULL;
@@ -63,7 +61,7 @@ static struct fs *fs_http_alloc(void)
 	struct http_fs *fs;
 
 	fs = i_new(struct http_fs, 1);
-	fs->fs = fs_class_http;
+	fs->fs = fs_class_s3;
 	return &fs->fs;
 }
 
@@ -76,6 +74,8 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	struct http_client_settings http_set;
 	const char *error;
 	const char *const *tmp;
+	const char *const *query_params;
+	const char *arg;
 	unsigned int uint;
 
 	fs->fs.set.root_path = fs->root_path;
@@ -87,12 +87,10 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 		return -1;
 	}
 
-	i_zero(&http_set);
-	http_set.event_parent = set->event;
+	query_params = t_strsplit_spaces(fs->url->enc_query, "&");
 
-	tmp = t_strsplit_spaces(fs->url->enc_query, "&");
-	for (; *tmp != NULL; tmp++) {
-		const char *arg = *tmp;
+	for (tmp = query_params; *tmp != NULL; tmp++) {
+		arg = *tmp;
 		if (str_begins(arg, "prefix=")) {
 			i_free(fs->path_prefix);
 			fs->path_prefix = i_strdup(arg + 7);
@@ -105,7 +103,25 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 				return -1;
 			}
 			fs->slow_warn_msec = uint * 1000;
-		} else if (str_begins(arg, "rawlog_dir=")) {
+		}
+	}
+
+	if (fs_http_client != NULL)
+		return 0;
+
+	/* Setup http client settings */
+	i_zero(&http_set);
+	http_set.event_parent = set->event;
+	http_set.max_idle_time_msecs = 5 * 1000;
+	http_set.max_parallel_connections = 10;
+	http_set.max_pipelined_requests = 10;
+	http_set.max_redirects = 1;
+	http_set.ssl = set->ssl_client_set;
+	http_set.dns_client = set->dns_client;
+
+	for (tmp = query_params; *tmp != NULL; tmp++) {
+		arg = *tmp;
+		if (str_begins(arg, "rawlog_dir=")){
 			http_set.rawlog_dir = i_strdup(arg + 11);
 		} else if (str_begins(arg, "debug=") == 0) {
 			http_set.debug = (arg[6] == 'y' || arg[6] == '1');
@@ -141,18 +157,7 @@ fs_http_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 			http_set.max_attempts = uint * 1000;
 		}
 	}
-
-	if (fs_http_client == NULL) {
-		http_set.max_idle_time_msecs = 5*1000;
-		http_set.max_parallel_connections = 10;
-		http_set.max_pipelined_requests = 10;
-		http_set.max_redirects = 1;
-		http_set.max_attempts = 3;
-		http_set.connect_timeout_msecs = 5*1000;
-		http_set.ssl = set->ssl_client_set;
-		http_set.dns_client = set->dns_client;
-		fs_http_client = http_client_init(&http_set);
-	}
+	fs_http_client = http_client_init(&http_set);
 
 	return 0;
 }
@@ -343,11 +348,10 @@ fs_http_response_callback(const struct http_response *response,
 	array_foreach(header_fields, field) {
 		if (str_begins(field->name, FS_HTTP_META_PREFIX)) {
 			name = field->name + strlen(FS_HTTP_META_PREFIX);
-			fs_default_set_metadata(&file->file,
-							name, field->value);
+			fs_default_set_metadata(&file->file, name, field->value);
 		} else if (strcasecmp(field->name, "Content-Length") == 0) {
 			if (str_to_int64(field->value, &file->st->st_size) < 0) {
-				i_error("fs_http: Content-Length is not int: %s",
+				i_error("fs_http: Content-Length is not int64: %s",
 						field->value);
 			}
 		} else if (strcasecmp(field->name, "X-ObjectID") == 0) {
@@ -599,6 +603,7 @@ static struct fs_iter *fs_http_iter_alloc(void)
 	return &iter->iter;
 }
 
+// TODO: implement
 static void
 fs_http_iter_init(struct fs_iter *_iter, const char *path,
 		   enum fs_iter_flags flags ATTR_UNUSED)
@@ -620,6 +625,7 @@ fs_http_iter_init(struct fs_iter *_iter, const char *path,
 	}
 }
 
+// TODO: implement
 static bool fs_http_iter_want(struct http_fs_iter *iter, const char *fname)
 {
 	FUNC_START();
@@ -640,6 +646,7 @@ static bool fs_http_iter_want(struct http_fs_iter *iter, const char *fname)
 	return ret;
 }
 
+// TODO: implement
 static const char *fs_http_iter_next(struct fs_iter *_iter)
 {
 	FUNC_START();
@@ -686,8 +693,8 @@ static int fs_http_iter_deinit(struct fs_iter *_iter)
 	return ret;
 }
 
-const struct fs fs_class_http = {
-	.name = "http",
+const struct fs fs_class_s3 = {
+	.name = "s3",
 	.v = {
 		fs_http_alloc,
 		fs_http_init,

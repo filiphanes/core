@@ -14,7 +14,7 @@ libfs_la_SOURCES = \
 	fs-metawrap.c \
 	fs-randomfail.c \
 	fs-posix.c \
-	fs-http.c \
+	fs-s3.c \
 	fs-test.c \
 	fs-test-async.c \
 	fs-sis.c \
