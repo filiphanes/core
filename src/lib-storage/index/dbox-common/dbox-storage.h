@@ -33,11 +33,11 @@ enum dbox_index_header_flags {
 struct dbox_storage_vfuncs {
 	/* dbox file has zero references now. it should be either freed or
 	   left open in case it's accessed again soon */
-	void (*file_free)(struct dbox_file *file);
+	void (*file_unrefed)(struct dbox_file *file);
 	/* create a new file using the same permissions as file.
 	   if parents=TRUE, create the directory if necessary */
-	struct fs_file *(*file_init_fs_file)(struct dbox_file *file,
-					 const char *path, bool parents);
+	int (*file_create_fd)(struct dbox_file *file, const char *path,
+			      bool parents);
 	/* open the mail and return its file/offset */
 	int (*mail_open)(struct dbox_mail *mail, uoff_t *offset_r,
 			 struct dbox_file **file_r);
@@ -58,8 +58,6 @@ struct dbox_storage {
 	struct mail_storage storage;
 	struct dbox_storage_vfuncs v;
 
-	struct fs *mail_fs;
-	const char *mail_dir;
 	struct fs *attachment_fs;
 	const char *attachment_dir;
 };

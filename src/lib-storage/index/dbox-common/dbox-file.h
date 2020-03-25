@@ -73,29 +73,6 @@ enum dbox_metadata_key {
 	DBOX_METADATA_OLDV1_SPACE	= ' '
 };
 
-/* Globally unique identifier for the message. Preserved when copying. */
-#define SDBOX_METADATA_GUID	"GUID"
-/* POP3 UIDL overriding the default format */
-#define SDBOX_METADATA_POP3_UIDL "POP3-UIDL"
-/* POP3 message ordering (for migrated mails) */
-#define SDBOX_METADATA_POP3_ORDER "POP3-Order"
-/* Received UNIX timestamp in hex */
-#define SDBOX_METADATA_RECEIVED_TIME "Received-Time"
-/* Physical message size in hex. Necessary only if it differs from
-	the dbox_message_header.message_size_hex, for example because the
-	message is compressed. */
-#define SDBOX_METADATA_PHYSICAL_SIZE "Physical-Size"
-/* Virtual message size in hex (line feeds counted as CRLF) */
-#define SDBOX_METADATA_VIRTUAL_SIZE	"Virtual-Size"
-/* Pointer to external message data. Format is:
-	1*(<start offset> <byte count> <options> <ref>) */
-#define SDBOX_METADATA_EXT_REF	"Ext-Ref"
-/* Mailbox name where this message was originally saved to.
-	When rebuild finds a message whose mailbox is unknown, it's
-	placed to this mailbox. */
-#define SDBOX_METADATA_ORIG_MAILBOX	"Orig-Mailbox"
-
-
 enum dbox_message_type {
 	/* Normal message */
 	DBOX_MESSAGE_TYPE_NORMAL	= 'N'
@@ -128,8 +105,6 @@ struct dbox_file {
 	const char *cur_path;
 	char *primary_path, *alt_path;
 	int fd;
-	struct fs_file *fs_file;
-	struct fs_lock *fs_lock;
 	struct istream *input;
 #ifdef DBOX_FILE_LOCK_METHOD_FLOCK
 	struct file_lock *lock;
@@ -156,7 +131,7 @@ struct dbox_file_append_context {
 	struct ostream *output;
 };
 
-#define dbox_file_is_open(file) ((file)->fs_file != NULL)
+#define dbox_file_is_open(file) ((file)->fd != -1)
 #define dbox_file_is_in_alt(file) ((file)->cur_path == (file)->alt_path)
 
 void dbox_file_init(struct dbox_file *file);

@@ -101,10 +101,10 @@ int dbox_storage_create(struct mail_storage *_storage,
 	struct dbox_storage *storage = DBOX_STORAGE(_storage);
 	const struct mail_storage_settings *set = _storage->set;
 	const char *error;
-	const char *name, *args, *dir;
 
 	if (*set->mail_attachment_fs != '\0' &&
 	    *set->mail_attachment_dir != '\0') {
+		const char *name, *args, *dir;
 
 		args = strpbrk(set->mail_attachment_fs, ": ");
 		if (args == NULL) {
@@ -134,26 +134,6 @@ int dbox_storage_create(struct mail_storage *_storage,
 		}
 	}
 
-	if (*set->mail_fs != '\0') {
-		args = strpbrk(set->mail_fs, ": ");
-		if (args == NULL) {
-			name = set->mail_fs;
-			args = "";
-		} else {
-			name = t_strdup_until(set->mail_fs, args++);
-		}
-
-		// TODO: get root_dir from mail_location
-		dir = mail_user_home_expand(_storage->user, set->mail_attachment_dir);
-
-		if (mailbox_list_init_fs(ns->list, name, args,
-					 storage->mail_dir,
-					 &storage->mail_fs, &error) < 0) {
-			*error_r = t_strdup_printf("mail_fs: %s", error);
-			return -1;
-		}
-	}
-
 	if (!ns->list->set.alt_dir_nocheck)
 		dbox_verify_alt_path(ns->list);
 	return 0;
@@ -163,7 +143,6 @@ void dbox_storage_destroy(struct mail_storage *_storage)
 {
 	struct dbox_storage *storage = DBOX_STORAGE(_storage);
 
-	fs_deinit(&storage->mail_fs);
 	fs_deinit(&storage->attachment_fs);
 	index_storage_destroy(_storage);
 }

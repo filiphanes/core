@@ -20,7 +20,7 @@ mdbox_file_init_new_alt(struct mdbox_storage *storage);
 int mdbox_file_assign_file_id(struct mdbox_file *file, uint32_t file_id);
 
 void mdbox_file_unrefed(struct dbox_file *file);
-struct fs_file * mdbox_file_init_fs_file(struct dbox_file *file, const char *path,
+int mdbox_file_create_fd(struct dbox_file *file, const char *path,
 			 bool parents);
 
 void mdbox_files_free(struct mdbox_storage *storage);

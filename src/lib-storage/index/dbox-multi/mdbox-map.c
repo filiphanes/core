@@ -936,7 +936,7 @@ mdbox_map_find_existing_append(struct mdbox_map_append_context *ctx,
 
 		if (dbox_file_is_in_alt(append->file) != want_altpath)
 			continue;
-		if (append->file->fs_file == NULL) {
+		if (append->file->fd == -1) {
 			/* already closed it (below). we might be able to still
 			   fit some small mail there, but that's too much
 			   trouble */

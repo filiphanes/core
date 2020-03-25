@@ -13,7 +13,6 @@
 
 static void sdbox_mail_set_expunged(struct dbox_mail *mail)
 {
-	FUNC_START();
 	struct mail *_mail = &mail->imail.mail.mail;
 
 	mail_index_refresh(_mail->box->index);
@@ -28,20 +27,16 @@ static void sdbox_mail_set_expunged(struct dbox_mail *mail)
 
 static int sdbox_mail_file_set(struct dbox_mail *mail)
 {
-	FUNC_START();
 	struct mail *_mail = &mail->imail.mail.mail;
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(_mail->box);
 	bool deleted;
-	const void *guid;
 	int ret;
 
 	if (mail->open_file != NULL) {
 		/* already set */
 		return 0;
 	} else if (!_mail->saving) {
-		mail_index_lookup_ext(_mail->transaction->view, _mail->seq,
-					mbox->guid_ext_id, &guid, &deleted);
-		mail->open_file = sdbox_file_init(mbox, guid);
+		mail->open_file = sdbox_file_init(mbox, _mail->uid);
 		return 0;
 	} else {
 		/* mail is being saved in this transaction */
@@ -66,7 +61,6 @@ static int
 sdbox_mail_get_special(struct mail *_mail, enum mail_fetch_field field,
 		       const char **value_r)
 {
-	FUNC_START();
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(_mail->box);
 	struct dbox_mail *mail = DBOX_MAIL(_mail);
 	struct stat st;
@@ -123,7 +117,6 @@ sdbox_mail_get_special(struct mail *_mail, enum mail_fetch_field field,
 int sdbox_mail_open(struct dbox_mail *mail, uoff_t *offset_r,
 		    struct dbox_file **file_r)
 {
-	FUNC_START();
 	struct mail *_mail = &mail->imail.mail.mail;
 	bool deleted;
 	int ret;

@@ -1,329 +1,218 @@
-/* Copyright (c) 2007-2018 Dovecot authors, see the included COPYING file */
+#ifndef DBOX_FILE_H
+#define DBOX_FILE_H
 
-#include "lib.h"
-#include "istream.h"
-#include "str.h"
-#include "index-storage.h"
-#include "index-mail.h"
-#include "index-pop3-uidl.h"
-#include "dbox-attachment.h"
-#include "dbox-storage.h"
-#include "dbox-file.h"
-#include "dbox-mail.h"
+/* The file begins with a header followed by zero or more messages:
 
+   <dbox message header>
+   <LF>
+   <message body>
+   <metadata>
 
-struct mail *
-dbox_mail_alloc(struct mailbox_transaction_context *t,
-		enum mail_fetch_field wanted_fields,
-		struct mailbox_header_lookup_ctx *wanted_headers)
-{
-	FUNC_START();
-	struct dbox_mail *mail;
-	pool_t pool;
+   Metadata block begins with DBOX_MAGIC_POST, followed by zero or more lines
+   in format <key character><value><LF>. The block ends with an empty line.
+   Unknown metadata should be ignored, but preserved when copying.
 
-	pool = pool_alloconly_create("mail", 2048);
-	mail = p_new(pool, struct dbox_mail, 1);
-	mail->imail.mail.pool = pool;
+   There should be no duplicates for the current metadata, but future
+   extensions may need them so they should be preserved.
+*/
+#define DBOX_VERSION 2
+#define DBOX_MAGIC_PRE "\001\002"
+#define DBOX_MAGIC_POST "\n\001\003\n"
 
-	index_mail_init(&mail->imail, t, wanted_fields, wanted_headers);
-	return &mail->imail.mail.mail;
-}
+/* prefer flock(). fcntl() locking currently breaks if trying to access the
+   same file from multiple mail_storages within same process. that's why we
+   fallback to dotlocks. */
+#ifdef HAVE_FLOCK
+#  define DBOX_FILE_LOCK_METHOD_FLOCK
+#endif
 
-void dbox_mail_close(struct mail *_mail)
-{
-	FUNC_START();
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
+struct dbox_file;
+struct stat;
 
-	index_mail_close(_mail);
-	/* close the dbox file only after index is closed, since it may still
-	   try to read from it. */
-	if (mail->open_file != NULL)
-		dbox_file_unref(&mail->open_file);
-}
+enum dbox_header_key {
+	/* Must be sizeof(struct dbox_message_header) when appending (hex) */
+	DBOX_HEADER_MSG_HEADER_SIZE	= 'M',
+	/* Creation UNIX timestamp (hex) */
+	DBOX_HEADER_CREATE_STAMP	= 'C',
 
-int dbox_mail_metadata_read(struct dbox_mail *mail, struct dbox_file **file_r)
-{
-	FUNC_START();
-	struct dbox_storage *storage =
-		DBOX_STORAGE(mail->imail.mail.mail.box->storage);
-	uoff_t offset;
+	/* metadata used by old Dovecot versions */
+	DBOX_HEADER_OLDV1_APPEND_OFFSET	= 'A'
+};
 
-	if (storage->v.mail_open(mail, &offset, file_r) < 0)
-		return -1;
+/* NOTE: all valid keys are uppercase characters. if this changes, change
+   dbox-file-fix.c:dbox_file_match_post_magic() to recognize them */
+enum dbox_metadata_key {
+	/* Globally unique identifier for the message. Preserved when
+	   copying. */
+	DBOX_METADATA_GUID		= 'G',
+	/* POP3 UIDL overriding the default format */
+	DBOX_METADATA_POP3_UIDL		= 'P',
+	/* POP3 message ordering (for migrated mails) */
+	DBOX_METADATA_POP3_ORDER	= 'O',
+	/* Received UNIX timestamp in hex */
+	DBOX_METADATA_RECEIVED_TIME	= 'R',
+	/* Physical message size in hex. Necessary only if it differs from
+	   the dbox_message_header.message_size_hex, for example because the
+	   message is compressed. */
+	DBOX_METADATA_PHYSICAL_SIZE	= 'Z',
+	/* Virtual message size in hex (line feeds counted as CRLF) */
+	DBOX_METADATA_VIRTUAL_SIZE	= 'V',
+	/* Pointer to external message data. Format is:
+	   1*(<start offset> <byte count> <options> <ref>) */
+	DBOX_METADATA_EXT_REF		= 'X',
+	/* Mailbox name where this message was originally saved to.
+	   When rebuild finds a message whose mailbox is unknown, it's
+	   placed to this mailbox. */
+	DBOX_METADATA_ORIG_MAILBOX	= 'B',
 
-	if (dbox_file_seek(*file_r, offset) <= 0)
-		return -1;
+	/* metadata used by old Dovecot versions */
+	DBOX_METADATA_OLDV1_EXPUNGED	= 'E',
+	DBOX_METADATA_OLDV1_FLAGS	= 'F',
+	DBOX_METADATA_OLDV1_KEYWORDS	= 'K',
+	DBOX_METADATA_OLDV1_SAVE_TIME	= 'S',
+	DBOX_METADATA_OLDV1_SPACE	= ' '
+};
 
-	if (mail->imail.data.stream != NULL) {
-		/* we just messed up mail's input stream by reading metadata */
-		i_stream_seek((*file_r)->input, offset);
-		i_stream_sync(mail->imail.data.stream);
-	}
-	return 0;
-}
+enum dbox_message_type {
+	/* Normal message */
+	DBOX_MESSAGE_TYPE_NORMAL	= 'N'
+};
 
-static int
-dbox_mail_metadata_get(struct dbox_mail *mail, enum dbox_metadata_key key,
-		       const char **value_r)
-{
-	FUNC_START();
-	struct dbox_file *file;
+struct dbox_message_header {
+	unsigned char magic_pre[2];
+	unsigned char type;
+	unsigned char space1;
+	unsigned char oldv1_uid_hex[8];
+	unsigned char space2;
+	unsigned char message_size_hex[16];
+	/* <space reserved for future extensions, LF is always last> */
+	unsigned char save_lf;
+};
 
-	if (dbox_mail_metadata_read(mail, &file) < 0)
-		return -1;
+struct dbox_metadata_header {
+	unsigned char magic_post[sizeof(DBOX_MAGIC_POST)-1];
+};
 
-	*value_r = dbox_file_metadata_get(file, key);
-	return 0;
-}
+struct dbox_file {
+	struct dbox_storage *storage;
+	int refcount;
 
-int dbox_mail_get_physical_size(struct mail *_mail, uoff_t *size_r)
-{
-	FUNC_START();
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	struct index_mail_data *data = &mail->imail.data;
-	struct dbox_file *file;
+	time_t create_time;
+	unsigned int file_version;
+	unsigned int file_header_size;
+	unsigned int msg_header_size;
 
-	if (index_mail_get_physical_size(_mail, size_r) == 0)
-		return 0;
-
-	if (dbox_mail_metadata_read(mail, &file) < 0)
-		return -1;
-
-	data->physical_size = dbox_file_get_plaintext_size(file);
-	*size_r = data->physical_size;
-	return 0;
-}
-
-int dbox_mail_get_virtual_size(struct mail *_mail, uoff_t *size_r)
-{
-	FUNC_START();
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	struct index_mail_data *data = &mail->imail.data;
-	const char *value;
-	uintmax_t size;
-
-	if (index_mail_get_cached_virtual_size(&mail->imail, size_r))
-		return 0;
-
-	if (dbox_mail_metadata_get(mail, DBOX_METADATA_VIRTUAL_SIZE,
-				   &value) < 0)
-		return -1;
-	if (value == NULL)
-		return index_mail_get_virtual_size(_mail, size_r);
-
-	if (str_to_uintmax_hex(value, &size) < 0 || size > (uoff_t)-1)
-		return -1;
-	data->virtual_size = (uoff_t)size;
-	*size_r = data->virtual_size;
-	return 0;
-}
-
-int dbox_mail_get_received_date(struct mail *_mail, time_t *date_r)
-{
-	FUNC_START();
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	struct index_mail_data *data = &mail->imail.data;
-	const char *value;
-	uintmax_t time;
-
-	if (index_mail_get_received_date(_mail, date_r) == 0)
-		return 0;
-
-	if (dbox_mail_metadata_get(mail, DBOX_METADATA_RECEIVED_TIME,
-				   &value) < 0)
-		return -1;
-
-	time = 0;
-	if (value != NULL && str_to_uintmax_hex(value, &time) < 0)
-		return -1;
-
-	data->received_date = (time_t)time;
-	*date_r = data->received_date;
-	return 0;
-}
-
-int dbox_mail_get_save_date(struct mail *_mail, time_t *date_r)
-{
-	FUNC_START();
-	struct dbox_storage *storage = DBOX_STORAGE(_mail->box->storage);
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	struct index_mail_data *data = &mail->imail.data;
-	struct dbox_file *file;
-	struct stat st;
-	uoff_t offset;
-
- 	if (index_mail_get_save_date(_mail, date_r) == 0)
-		return 0;
-
-	if (storage->v.mail_open(mail, &offset, &file) < 0)
-		return -1;
-
-	_mail->transaction->stats.fstat_lookup_count++;
-	if (dbox_file_stat(file, &st) < 0) {
-		if (errno == ENOENT)
-			mail_set_expunged(_mail);
-		return -1;
-	}
-	*date_r = data->save_date = st.st_ctime;
-	return 0;
-}
-
-static int
-dbox_get_cached_metadata(struct dbox_mail *mail, enum dbox_metadata_key key,
-			 enum index_cache_field cache_field,
-			 const char **value_r)
-{
-	FUNC_START();
-	struct index_mail *imail = &mail->imail;
-	struct index_mailbox_context *ibox =
-		INDEX_STORAGE_CONTEXT(imail->mail.mail.box);
-	const char *value;
-	string_t *str;
-	uint32_t order;
-
-	str = str_new(imail->mail.data_pool, 64);
-	if (mail_cache_lookup_field(imail->mail.mail.transaction->cache_view,
-				    str, imail->mail.mail.seq,
-				    ibox->cache_fields[cache_field].idx) > 0) {
-		if (cache_field == MAIL_CACHE_POP3_ORDER) {
-			i_assert(str_len(str) == sizeof(order));
-			memcpy(&order, str_data(str), sizeof(order));
-			str_truncate(str, 0);
-			if (order != 0)
-				str_printfa(str, "%u", order);
-			else {
-				/* order=0 means it doesn't exist. we don't
-				   want to return "0" though, because then the
-				   mails get ordered to beginning, while
-				   nonexistent are supposed to be ordered at
-				   the end. */
-			}
-		}
-		*value_r = str_c(str);
-		return 0;
-	}
-
-	if (dbox_mail_metadata_get(mail, key, &value) < 0)
-		return -1;
-
-	if (value == NULL)
-		value = "";
-	if (cache_field != MAIL_CACHE_POP3_ORDER) {
-		index_mail_cache_add_idx(imail, ibox->cache_fields[cache_field].idx,
-					 value, strlen(value));
-	} else {
-		if (str_to_uint(value, &order) < 0)
-			order = 0;
-		index_mail_cache_add_idx(imail, ibox->cache_fields[cache_field].idx,
-					 &order, sizeof(order));
-	}
-
-	/* don't return pointer to dbox metadata directly, since it may
-	   change unexpectedly */
-	str_truncate(str, 0);
-	str_append(str, value);
-	*value_r = str_c(str);
-	return 0;
-}
-
-int dbox_mail_get_special(struct mail *_mail, enum mail_fetch_field field,
-			  const char **value_r)
-{
-	FUNC_START();
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	int ret;
-
-	/* keep the UIDL in cache file, otherwise POP3 would open all
-	   mail files and read the metadata. same for GUIDs if they're
-	   used. */
-	switch (field) {
-	case MAIL_FETCH_UIDL_BACKEND:
-		if (!index_pop3_uidl_can_exist(_mail)) {
-			*value_r = "";
-			return 0;
-		}
-		ret = dbox_get_cached_metadata(mail, DBOX_METADATA_POP3_UIDL,
-					       MAIL_CACHE_POP3_UIDL, value_r);
-		if (ret == 0) {
-			index_pop3_uidl_update_exists(&mail->imail.mail.mail,
-						      (*value_r)[0] != '\0');
-		}
-		return ret;
-	case MAIL_FETCH_POP3_ORDER:
-		if (!index_pop3_uidl_can_exist(_mail)) {
-			/* we're assuming that if there's a POP3 order, there's
-			   also a UIDL */
-			*value_r = "";
-			return 0;
-		}
-		return dbox_get_cached_metadata(mail, DBOX_METADATA_POP3_ORDER,
-						MAIL_CACHE_POP3_ORDER, value_r);
-	case MAIL_FETCH_GUID:
-		return dbox_get_cached_metadata(mail, DBOX_METADATA_GUID,
-						MAIL_CACHE_GUID, value_r);
-	default:
-		break;
-	}
-
-	return index_mail_get_special(_mail, field, value_r);
-}
-
-static int
-get_mail_stream(struct dbox_mail *mail, uoff_t offset,
-		struct istream **stream_r)
-{
-	FUNC_START();
-	struct mail_private *pmail = &mail->imail.mail;
-	struct dbox_file *file = mail->open_file;
-	int ret;
-
-	if ((ret = dbox_file_seek(file, offset)) <= 0) {
-		*stream_r = NULL;
-		return ret;
-	}
-
-	*stream_r = i_stream_create_limit(file->input, file->cur_physical_size);
-	if (pmail->v.istream_opened != NULL) {
-		if (pmail->v.istream_opened(&pmail->mail, stream_r) < 0)
-			return -1;
-	}
-	if (file->storage->attachment_dir == NULL)
-		return 1;
-	else
-		return dbox_attachment_file_get_stream(file, stream_r);
-}
-
-int dbox_mail_get_stream(struct mail *_mail, bool get_body ATTR_UNUSED,
-			 struct message_size *hdr_size,
-			 struct message_size *body_size,
-			 struct istream **stream_r)
-{
-	FUNC_START();
-	struct dbox_storage *storage = DBOX_STORAGE(_mail->box->storage);
-	struct dbox_mail *mail = DBOX_MAIL(_mail);
-	struct index_mail_data *data = &mail->imail.data;
+	const char *cur_path;
+	char *primary_path, *alt_path;
+	int fd;
 	struct istream *input;
-	uoff_t offset;
-	int ret;
+#ifdef DBOX_FILE_LOCK_METHOD_FLOCK
+	struct file_lock *lock;
+#else
+	struct dotlock *lock;
+#endif
 
-	if (data->stream == NULL) {
-		if (storage->v.mail_open(mail, &offset, &mail->open_file) < 0)
-			return -1;
+	uoff_t cur_offset;
+	uoff_t cur_physical_size;
 
-		ret = get_mail_stream(mail, offset, &input);
-		if (ret <= 0) {
-			if (ret < 0)
-				return -1;
-			dbox_file_set_corrupted(mail->open_file,
-				"uid=%u points to broken data at offset="
-				"%"PRIuUOFF_T, _mail->uid, offset);
-			i_stream_unref(&input);
-			return -1;
-		}
-		data->stream = input;
-		index_mail_set_read_buffer_size(_mail, input);
-	}
+	/* Metadata for the currently seeked metadata block. */
+	pool_t metadata_pool;
+	ARRAY(const char *) metadata;
+	uoff_t metadata_read_offset;
 
-	return index_mail_init_stream(&mail->imail, hdr_size, body_size,
-				      stream_r);
-}
+	bool appending:1;
+	bool corrupted:1;
+};
+
+struct dbox_file_append_context {
+	struct dbox_file *file;
+
+	uoff_t first_append_offset, last_checkpoint_offset, last_flush_offset;
+	struct ostream *output;
+};
+
+#define dbox_file_is_open(file) ((file)->fd != -1)
+#define dbox_file_is_in_alt(file) ((file)->cur_path == (file)->alt_path)
+
+void dbox_file_init(struct dbox_file *file);
+void dbox_file_unref(struct dbox_file **file);
+
+/* Open the file. Returns 1 if ok, 0 if file header is corrupted, -1 if error.
+   If file is deleted, deleted_r=TRUE and 1 is returned. */
+int dbox_file_open(struct dbox_file *file, bool *deleted_r);
+/* Try to open file only from primary path. */
+int dbox_file_open_primary(struct dbox_file *file, bool *notfound_r);
+/* Close the file handle from the file, but don't free it. */
+void dbox_file_close(struct dbox_file *file);
+
+/* fstat() or stat() the file. If file is already deleted, fails with
+   errno=ENOENT. */
+int dbox_file_stat(struct dbox_file *file, struct stat *st_r);
+
+/* Try to lock the dbox file. Returns 1 if ok, 0 if already locked by someone
+   else, -1 if error. */
+int dbox_file_try_lock(struct dbox_file *file);
+void dbox_file_unlock(struct dbox_file *file);
+
+/* Seek to given offset in file. Returns 1 if ok/expunged, 0 if file/offset is
+   corrupted, -1 if I/O error. */
+int dbox_file_seek(struct dbox_file *file, uoff_t offset);
+/* Start seeking at the beginning of the file. */
+void dbox_file_seek_rewind(struct dbox_file *file);
+/* Seek to next message after current one. If there are no more messages,
+   returns 0 and last_r is set to TRUE. Returns 1 if ok, 0 if file is
+   corrupted, -1 if I/O error. */
+int dbox_file_seek_next(struct dbox_file *file, uoff_t *offset_r, bool *last_r);
+
+/* Start appending to dbox file */
+struct dbox_file_append_context *dbox_file_append_init(struct dbox_file *file);
+/* Finish writing appended mails. */
+int dbox_file_append_commit(struct dbox_file_append_context **ctx);
+/* Truncate appended mails. */
+void dbox_file_append_rollback(struct dbox_file_append_context **ctx);
+/* Get output stream for appending a new message. Returns 1 if ok, 0 if file
+   can't be appended to (old file version or corruption) or -1 if error. */
+int dbox_file_get_append_stream(struct dbox_file_append_context *ctx,
+				struct ostream **output_r);
+/* Call after message has been fully saved. If this isn't done, the writes
+   since the last checkpoint are truncated. */
+void dbox_file_append_checkpoint(struct dbox_file_append_context *ctx);
+/* Flush output buffer. */
+int dbox_file_append_flush(struct dbox_file_append_context *ctx);
+
+/* Read current message's metadata. Returns 1 if ok, 0 if metadata is
+   corrupted, -1 if I/O error. */
+int dbox_file_metadata_read(struct dbox_file *file);
+/* Return wanted metadata value, or NULL if not found. */
+const char *dbox_file_metadata_get(struct dbox_file *file,
+				   enum dbox_metadata_key key);
+
+/* Returns DBOX_METADATA_PHYSICAL_SIZE if set, otherwise physical size from
+   header. They differ only for e.g. compressed mails. */
+uoff_t dbox_file_get_plaintext_size(struct dbox_file *file);
+
+/* Fix a broken dbox file by rename()ing over it with a fixed file. Everything
+   before start_offset is assumed to be valid and is simply copied. The file
+   is reopened afterwards. Returns 1 if ok, 0 if the resulting file has no
+   mails and was deleted, -1 if I/O error. */
+int dbox_file_fix(struct dbox_file *file, uoff_t start_offset);
+/* Delete the given dbox file. Returns 1 if deleted, 0 if file wasn't found
+   or -1 if error. */
+int dbox_file_unlink(struct dbox_file *file);
+
+/* Fill dbox_message_header with given size. */
+void dbox_msg_header_fill(struct dbox_message_header *dbox_msg_hdr,
+			  uoff_t message_size);
+
+void dbox_file_set_syscall_error(struct dbox_file *file, const char *function);
+void dbox_file_set_corrupted(struct dbox_file *file, const char *reason, ...)
+	ATTR_FORMAT(2, 3);
+
+/* private: */
+const char *dbox_generate_tmp_filename(void);
+void dbox_file_free(struct dbox_file *file);
+int dbox_file_header_write(struct dbox_file *file, struct ostream *output);
+int dbox_file_read_mail_header(struct dbox_file *file, uoff_t *physical_size_r);
+int dbox_file_metadata_skip_header(struct dbox_file *file);
+
+#endif

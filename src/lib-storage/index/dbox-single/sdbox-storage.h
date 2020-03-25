@@ -25,7 +25,7 @@ struct sdbox_mailbox {
 	struct mailbox box;
 	struct sdbox_storage *storage;
 
-	uint32_t hdr_ext_id, guid_ext_id;
+	uint32_t hdr_ext_id;
 	/* if non-zero, storage should be rebuilt (except if rebuild_count
 	   has changed from this value) */
 	uint32_t corrupted_rebuild_count;

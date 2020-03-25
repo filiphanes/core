@@ -18,7 +18,6 @@
 #include "sdbox-storage.h"
 #include "sdbox-file.h"
 #include "sdbox-sync.h"
-#include "fs-api.h"
 
 
 struct sdbox_save_context {
@@ -39,7 +38,6 @@ struct sdbox_save_context {
 struct dbox_file *
 sdbox_save_file_get_file(struct mailbox_transaction_context *t, uint32_t seq)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(t->save_ctx);
 	struct dbox_file *const *files, *file;
 	unsigned int count;
@@ -58,7 +56,6 @@ sdbox_save_file_get_file(struct mailbox_transaction_context *t, uint32_t seq)
 struct mail_save_context *
 sdbox_save_alloc(struct mailbox_transaction_context *t)
 {
-	FUNC_START();
 	struct sdbox_mailbox *mbox = SDBOX_MAILBOX(t->box);
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(t->save_ctx);
 
@@ -84,7 +81,6 @@ sdbox_save_alloc(struct mailbox_transaction_context *t)
 
 void sdbox_save_add_file(struct mail_save_context *_ctx, struct dbox_file *file)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
 	struct dbox_file *const *files;
 	unsigned int count;
@@ -103,13 +99,11 @@ void sdbox_save_add_file(struct mail_save_context *_ctx, struct dbox_file *file)
 
 int sdbox_save_begin(struct mail_save_context *_ctx, struct istream *input)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
 	struct dbox_file *file;
-	guid_128_t guid;
 	int ret;
 
-	file = sdbox_file_init(ctx->mbox, guid);
+	file = sdbox_file_create(ctx->mbox);
 	ctx->append_ctx = dbox_file_append_init(file);
 	ret = dbox_file_get_append_stream(ctx->append_ctx,
 					  &ctx->ctx.dbox_output);
@@ -127,68 +121,10 @@ int sdbox_save_begin(struct mail_save_context *_ctx, struct istream *input)
 	return ctx->ctx.failed ? -1 : 0;
 }
 
-static void sdbox_save_set_fs_metadata(struct mail_save_context *_ctx,
-			struct dbox_file *file,
-			uoff_t output_msg_size ATTR_UNUSED,
-			const char *orig_mailbox_name,
-			guid_128_t guid_128)
-{
-	struct dbox_save_context *ctx = DBOX_SAVECTX(_ctx);
-	struct sdbox_file *sfile = container_of(file, struct sdbox_file, file);
-	struct mail_save_data *mdata = &ctx->ctx.data;
-	const char *guid;
-	uoff_t vsize;
-
-	fs_set_metadata(file->fs_file, SDBOX_METADATA_RECEIVED_TIME,
-					i_strdup_printf("%zu", mdata->received_date));
-	if (mail_get_virtual_size(_ctx->dest_mail, &vsize) < 0)
-		i_unreached();
-	fs_set_metadata(file->fs_file, SDBOX_METADATA_VIRTUAL_SIZE,
-					i_strdup_printf("%llx", (unsigned long long)vsize));
-	if (mdata->pop3_uidl != NULL) {
-		i_assert(strchr(mdata->pop3_uidl, '\n') == NULL);
-		fs_set_metadata(file->fs_file, SDBOX_METADATA_POP3_UIDL,
-						mdata->pop3_uidl);
-		ctx->have_pop3_uidls = TRUE;
-		ctx->highest_pop3_uidl_seq =
-			I_MAX(ctx->highest_pop3_uidl_seq, ctx->seq);
-	}
-	if (mdata->pop3_order != 0) {
-		fs_set_metadata(file->fs_file, SDBOX_METADATA_POP3_ORDER,
-						i_strdup_printf("%u", mdata->pop3_order));
-		ctx->have_pop3_orders = TRUE;
-		ctx->highest_pop3_uidl_seq =
-			I_MAX(ctx->highest_pop3_uidl_seq, ctx->seq);
-	}
-
-	guid = mdata->guid;
-	if (guid != NULL) {
-		i_debug("mdata->guid: %s", guid);
-		mail_generate_guid_128_hash(guid, guid_128);
-	} else {
-		guid_128_generate(guid_128);
-		guid = guid_128_to_string(guid_128);
-	}
-	fs_set_metadata(file->fs_file, FS_METADATA_WRITE_FNAME,
-			(const char*) sdbox_file_make_path(sfile, guid));
-
-	if (orig_mailbox_name != NULL &&
-	    strchr(orig_mailbox_name, '\r') == NULL &&
-	    strchr(orig_mailbox_name, '\n') == NULL) {
-		/* save the original mailbox name so if mailbox indexes get
-		   corrupted we can place at least some (hopefully most) of
-		   the messages to correct mailboxes. */
-		fs_set_metadata(file->fs_file, "Orig-Mailbox", orig_mailbox_name);
-	}
-}
-
-static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
+static int dbox_save_mail_write_metadata(struct dbox_save_context *ctx,
 					 struct dbox_file *file)
 {
-	FUNC_START();
-	struct dbox_save_context *ctx = DBOX_SAVECTX(_ctx);
-	struct sdbox_save_context *sctx = SDBOX_SAVECTX(_ctx);
-	struct sdbox_file *sfile = container_of(file, struct sdbox_file, file);
+	struct sdbox_file *sfile = (struct sdbox_file *)file;
 	const ARRAY_TYPE(mail_attachment_extref) *extrefs_arr;
 	const struct mail_attachment_extref *extrefs;
 	struct dbox_message_header dbox_msg_hdr;
@@ -196,28 +132,24 @@ static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
 	guid_128_t guid_128;
 	unsigned int i, count;
 
-	// we don't use header i_assert(file->msg_header_size == sizeof(dbox_msg_hdr));
+	i_assert(file->msg_header_size == sizeof(dbox_msg_hdr));
 
 	message_size = ctx->dbox_output->offset -
 		file->msg_header_size - file->file_header_size;
 
-	sdbox_save_set_fs_metadata(_ctx, file,
-				 message_size, sctx->mbox->box.name, guid_128);
-	i_debug("guid after sdbox_save_set_fs_metadata: %s", guid_128_to_string(guid_128));
-	// dbox_save_write_metadata(_ctx, ctx->dbox_output, message_size, NULL, guid_128);
-	// i_debug("guid after dbox_save_write_metadata: %s", guid_128_to_string(guid_128));
-	/* save the 128bit GUID to index so we can quickly find the message */
-	mail_index_update_ext(ctx->trans, ctx->seq,
-						  sctx->mbox->guid_ext_id, guid_128, NULL);
-	FUNC_IN();
-	// bool expunged;
-	// mail_index_lookup_ext(ctx->trans, ctx->seq,
-	// 					  sctx->mbox->guid_ext_id, &guid_128, &expunged);
-
+	dbox_save_write_metadata(&ctx->ctx, ctx->dbox_output,
+				 message_size, NULL, guid_128);
+	dbox_msg_header_fill(&dbox_msg_hdr, message_size);
+	if (o_stream_pwrite(ctx->dbox_output, &dbox_msg_hdr,
+			    sizeof(dbox_msg_hdr),
+			    file->file_header_size) < 0) {
+		dbox_file_set_syscall_error(file, "pwrite()");
+		return -1;
+	}
 	sfile->written_to_disk = TRUE;
 
 	/* remember the attachment paths until commit time */
-	extrefs_arr = index_attachment_save_get_extrefs(_ctx);
+	extrefs_arr = index_attachment_save_get_extrefs(&ctx->ctx);
 	if (extrefs_arr != NULL)
 		extrefs = array_get(extrefs_arr, &count);
 	else {
@@ -240,8 +172,7 @@ static int sdbox_save_mail_write_metadata(struct mail_save_context *_ctx,
 
 static int dbox_save_finish_write(struct mail_save_context *_ctx)
 {
-	FUNC_START();
-	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
+	struct sdbox_save_context *ctx = (struct sdbox_save_context *)_ctx;
 	struct dbox_file **files;
 
 	ctx->ctx.finished = TRUE;
@@ -259,7 +190,7 @@ static int dbox_save_finish_write(struct mail_save_context *_ctx)
 
 	files = array_back_modifiable(&ctx->files);
 	if (!ctx->ctx.failed) T_BEGIN {
-		if (sdbox_save_mail_write_metadata(_ctx, *files) < 0)
+		if (dbox_save_mail_write_metadata(&ctx->ctx, *files) < 0)
 			ctx->ctx.failed = TRUE;
 	} T_END;
 
@@ -284,7 +215,6 @@ static int dbox_save_finish_write(struct mail_save_context *_ctx)
 
 int sdbox_save_finish(struct mail_save_context *ctx)
 {
-	FUNC_START();
 	int ret;
 
 	ret = dbox_save_finish_write(ctx);
@@ -294,18 +224,15 @@ int sdbox_save_finish(struct mail_save_context *ctx)
 
 void sdbox_save_cancel(struct mail_save_context *_ctx)
 {
-	FUNC_START();
 	struct dbox_save_context *ctx = DBOX_SAVECTX(_ctx);
 
 	ctx->failed = TRUE;
 	(void)sdbox_save_finish(_ctx);
 }
 
-/* not used anymore
 static int dbox_save_assign_uids(struct sdbox_save_context *ctx,
 				 const ARRAY_TYPE(seq_range) *uids)
 {
-	FUNC_START();
 	struct dbox_file *const *files;
 	struct seq_range_iter iter;
 	unsigned int i, count, n = 0;
@@ -329,18 +256,19 @@ static int dbox_save_assign_uids(struct sdbox_save_context *ctx,
 	i_assert(!seq_range_array_iter_nth(&iter, n, &uid));
 	return 0;
 }
-*/
 
 static void dbox_save_unref_files(struct sdbox_save_context *ctx)
 {
-	FUNC_START();
 	struct dbox_file **files;
 	unsigned int i, count;
 
 	files = array_get_modifiable(&ctx->files, &count);
 	for (i = 0; i < count; i++) {
 		if (ctx->ctx.failed) {
-			(void)sdbox_file_unlink_aborted_save(files[i]);
+			struct sdbox_file *sfile =
+				(struct sdbox_file *)files[i];
+
+			(void)sdbox_file_unlink_aborted_save(sfile);
 		}
 		dbox_file_unref(&files[i]);
 	}
@@ -349,7 +277,6 @@ static void dbox_save_unref_files(struct sdbox_save_context *ctx)
 
 int sdbox_transaction_save_commit_pre(struct mail_save_context *_ctx)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
 	struct mailbox_transaction_context *_t = _ctx->transaction;
 	const struct mail_index_header *hdr;
@@ -373,17 +300,12 @@ int sdbox_transaction_save_commit_pre(struct mail_save_context *_ctx)
 
 	/* assign UIDs for new messages */
 	hdr = mail_index_get_header(ctx->sync_ctx->sync_view);
-
-	// TODO: move uid assignment to sdbox_save_begin by setting FS_METADATA_WRITE_FNAME
-	/* assign UIDs for new messages */
 	mail_index_append_finish_uids(ctx->ctx.trans, hdr->next_uid,
-						&_t->changes->saved_uids);
-	/* TODO: don't assign uids, but save with immutable message guids
+				      &_t->changes->saved_uids);
 	if (dbox_save_assign_uids(ctx, &_t->changes->saved_uids) < 0) {
 		sdbox_transaction_save_rollback(_ctx);
 		return -1;
 	}
-	*/
 
 	_t->changes->uid_validity = hdr->uid_validity;
 	return 0;
@@ -392,8 +314,8 @@ int sdbox_transaction_save_commit_pre(struct mail_save_context *_ctx)
 void sdbox_transaction_save_commit_post(struct mail_save_context *_ctx,
 					struct mail_index_transaction_commit_result *result)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
+	struct mail_storage *storage = _ctx->transaction->box->storage;
 
 	_ctx->transaction = NULL; /* transaction is already freed */
 
@@ -408,6 +330,14 @@ void sdbox_transaction_save_commit_post(struct mail_save_context *_ctx,
 	if (sdbox_sync_finish(&ctx->sync_ctx, TRUE) < 0)
 		ctx->ctx.failed = TRUE;
 
+	if (storage->set->parsed_fsync_mode != FSYNC_MODE_NEVER) {
+		const char *box_path = mailbox_get_path(&ctx->mbox->box);
+
+		if (fdatasync_path(box_path) < 0) {
+			mail_set_critical(_ctx->dest_mail,
+				"fdatasync_path(%s) failed: %m", box_path);
+		}
+	}
 	i_assert(ctx->ctx.finished);
 	dbox_save_unref_files(ctx);
 	i_free(ctx);
@@ -415,7 +345,6 @@ void sdbox_transaction_save_commit_post(struct mail_save_context *_ctx,
 
 void sdbox_transaction_save_rollback(struct mail_save_context *_ctx)
 {
-	FUNC_START();
 	struct sdbox_save_context *ctx = SDBOX_SAVECTX(_ctx);
 
 	ctx->ctx.failed = TRUE;

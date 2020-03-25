@@ -4,7 +4,6 @@
 #include "hex-dec.h"
 #include "istream.h"
 #include "ostream.h"
-#include "fs-api.h"
 #include "message-size.h"
 #include "dbox-storage.h"
 #include "dbox-file.h"
@@ -17,7 +16,6 @@ static int
 dbox_file_match_pre_magic(struct istream *input,
 			  uoff_t *pre_offset, size_t *need_bytes)
 {
-	FUNC_START();
 	const struct dbox_message_header *hdr;
 	const unsigned char *data;
 	size_t size;
@@ -70,7 +68,6 @@ static int
 dbox_file_match_post_magic(struct istream *input, bool input_full,
 			   size_t *need_bytes)
 {
-	FUNC_START();
 	const unsigned char *data, *p;
 	size_t i, size;
 	bool allow_control;
@@ -138,7 +135,6 @@ dbox_file_match_post_magic(struct istream *input, bool input_full,
 static int
 dbox_file_find_next_magic(struct dbox_file *file, uoff_t *offset_r, bool *pre_r)
 {
-	FUNC_START();
 	/* We're scanning message bodies here, trying to find the beginning of
 	   the next message. Although our magic strings are very unlikely to
 	   be found in regular emails, they are much more likely when emails
@@ -236,7 +232,6 @@ static int
 stream_copy(struct dbox_file *file, struct ostream *output,
 	    const char *out_path, uoff_t count)
 {
-	FUNC_START();
 	struct istream *input;
 	int ret = 0;
 
@@ -266,7 +261,6 @@ stream_copy(struct dbox_file *file, struct ostream *output,
 
 static void dbox_file_skip_broken_header(struct dbox_file *file)
 {
-	FUNC_START();
 	const size_t magic_len = strlen(DBOX_MAGIC_PRE);
 	const unsigned char *data;
 	size_t i, size;
@@ -292,7 +286,6 @@ static void
 dbox_file_copy_metadata(struct dbox_file *file, struct ostream *output,
 			bool *have_guid_r)
 {
-	FUNC_START();
 	const char *line;
 	uoff_t prev_offset = file->input->v_offset;
 
@@ -322,7 +315,6 @@ static int
 dbox_file_fix_write_stream(struct dbox_file *file, uoff_t start_offset,
 			   const char *temp_path, struct ostream *output)
 {
-	FUNC_START();
 	struct dbox_message_header msg_hdr;
 	uoff_t offset, msg_size, hdr_offset, body_offset;
 	bool pre, write_header, have_guid;
@@ -338,15 +330,13 @@ dbox_file_fix_write_stream(struct dbox_file *file, uoff_t start_offset,
 		if (stream_copy(file, output, temp_path, start_offset) < 0)
 			return -1;
 	} else {
-		/* the file header is broken. recreate it
+		/* the file header is broken. recreate it */
 		if (dbox_file_header_write(file, output) < 0) {
 			dbox_file_set_syscall_error(file, "write()");
 			return -1;
 		}
-		 */
 	}
 
-	// TODO: don't use msg header
 	while ((ret = dbox_file_find_next_magic(file, &offset, &pre)) > 0) {
 		msg_size = offset - file->input->v_offset;
 		if (msg_size < 256 && pre) {
@@ -456,12 +446,10 @@ dbox_file_fix_write_stream(struct dbox_file *file, uoff_t start_offset,
 
 int dbox_file_fix(struct dbox_file *file, uoff_t start_offset)
 {
-	FUNC_START();
 	struct ostream *output;
 	const char *dir, *p, *temp_path, *broken_path;
 	bool deleted, have_messages;
-	struct fs_file *fs_file;
-	int ret;
+	int fd, ret;
 
 	i_assert(dbox_file_is_open(file));
 
@@ -470,30 +458,31 @@ int dbox_file_fix(struct dbox_file *file, uoff_t start_offset)
 	dir = t_strdup_until(file->cur_path, p);
 
 	temp_path = t_strdup_printf("%s/%s", dir, dbox_generate_tmp_filename());
-	fs_file = file->storage->v.file_init_fs_file(file, temp_path, FALSE);
-	if (fs_file == NULL)
+	fd = file->storage->v.file_create_fd(file, temp_path, FALSE);
+	if (fd == -1)
 		return -1;
 
-	output = fs_write_stream(fs_file);
+	output = o_stream_create_fd_file(fd, 0, FALSE);
+	o_stream_cork(output);
 	ret = dbox_file_fix_write_stream(file, start_offset, temp_path, output);
 	if (ret < 0)
-		fs_write_stream_abort_error(fs_file, &output,
-				"dbox_file_fix_write_stream() failed");
+		o_stream_abort(output);
 	have_messages = output->offset > file->file_header_size;
-
-	fs_file_close(fs_file);
-
-	if (ret < 0)
-	{
-		if (fs_delete(fs_file) < 0) {
+	o_stream_unref(&output);
+	if (close(fd) < 0) {
+		mail_storage_set_critical(&file->storage->storage,
+					  "close(%s) failed: %m", temp_path);
+		ret = -1;
+	}
+	if (ret < 0) {
+		if (unlink(temp_path) < 0) {
 			mail_storage_set_critical(&file->storage->storage,
-				"fs_delete(%s) failed: %m", temp_path);
+				"unlink(%s) failed: %m", temp_path);
 		}
 		return -1;
 	}
 	/* keep a copy of the original file in case someone wants to look
 	   at it */
-	/* TODO: implement in fs-api
 	broken_path = t_strconcat(file->cur_path,
 				  DBOX_MAIL_FILE_BROKEN_COPY_SUFFIX, NULL);
 	if (link(file->cur_path, broken_path) < 0) {
@@ -504,14 +493,13 @@ int dbox_file_fix(struct dbox_file *file, uoff_t start_offset)
 		i_warning("dbox: Copy of the broken file saved to %s",
 			  broken_path);
 	}
-	*/
 	if (!have_messages) {
 		/* the resulting file has no messages. just delete the file. */
-		fs_delete(fs_file);
 		dbox_file_close(file);
+		i_unlink(temp_path);
+		i_unlink(file->cur_path);
 		return 0;
 	}
-	// TODO: use fs-api
 	if (rename(temp_path, file->cur_path) < 0) {
 		mail_storage_set_critical(&file->storage->storage,
 					  "rename(%s, %s) failed: %m",

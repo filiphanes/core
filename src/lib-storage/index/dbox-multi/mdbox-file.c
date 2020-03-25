@@ -14,7 +14,6 @@
 #include "fdatasync-path.h"
 #include "eacces-error.h"
 #include "str.h"
-#include "fs-api.h"
 #include "mailbox-list-private.h"
 #include "mdbox-storage.h"
 #include "mdbox-map-private.h"
@@ -104,14 +103,14 @@ static int mdbox_file_create(struct mdbox_file *file)
 {
 	struct dbox_file *_file = &file->file;
 	bool create_parents;
+	int ret;
 
 	create_parents = dbox_file_is_in_alt(_file);
-	_file->fs_file = _file->storage->v.
-		file_init_fs_file(_file, _file->cur_path, create_parents);
-	if (_file->fs_file == NULL)
+	_file->fd = _file->storage->v.
+		file_create_fd(_file, _file->cur_path, create_parents);
+	if (_file->fd == -1)
 		return -1;
 
-	/* fs-api can't preallocate file
 	if (file->storage->preallocate_space) {
 		ret = file_preallocate(_file->fd,
 				       file->storage->set->mdbox_rotate_size);
@@ -119,7 +118,7 @@ static int mdbox_file_create(struct mdbox_file *file)
 			switch (errno) {
 			case ENOSPC:
 			case EDQUOT:
-				// ignore
+				/* ignore */
 				break;
 			default:
 				i_error("file_preallocate(%s) failed: %m",
@@ -127,13 +126,10 @@ static int mdbox_file_create(struct mdbox_file *file)
 				break;
 			}
 		} else if (ret == 0) {
-	*/
 			/* not supported by filesystem, disable. */
 			file->storage->preallocate_space = FALSE;
-	/*
 		}
 	}
-	*/
 	return 0;
 }
 
@@ -301,24 +297,53 @@ void mdbox_file_unrefed(struct dbox_file *file)
 	dbox_file_free(file);
 }
 
-struct fs_file *
-mdbox_file_init_fs_file(struct dbox_file *file, const char *path, bool parents)
+int mdbox_file_create_fd(struct dbox_file *file, const char *path, bool parents)
 {
 	struct mdbox_file *mfile = (struct mdbox_file *)file;
 	struct mdbox_map *map = mfile->storage->map;
 	struct mailbox_permissions perm;
 	mode_t old_mask;
 	const char *p, *dir;
-	struct fs_file *fs_file;
+	int fd;
 
 	mailbox_list_get_root_permissions(map->root_list, &perm);
 
 	old_mask = umask(0666 & ~perm.file_create_mode);
-	fs_file = fs_file_init(file->storage->mail_fs, path, FS_OPEN_MODE_REPLACE);
+	fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
 	umask(old_mask);
-	if (fs_file == NULL) {
-		mail_storage_set_critical(&file->storage,
-			"fs_file_init(%s, FS_OPEN_MODE_REPLACE) failed: %m", path);
+	if (fd == -1 && errno == ENOENT && parents &&
+	    (p = strrchr(path, '/')) != NULL) {
+		dir = t_strdup_until(path, p);
+		if (mailbox_list_mkdir_root(map->root_list, dir,
+					    path != file->alt_path ?
+					    MAILBOX_LIST_PATH_TYPE_DIR :
+					    MAILBOX_LIST_PATH_TYPE_ALT_DIR) < 0) {
+			mail_storage_copy_list_error(&file->storage->storage,
+						     map->root_list);
+			return -1;
+		}
+		/* try again */
+		old_mask = umask(0666 & ~perm.file_create_mode);
+		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+		umask(old_mask);
 	}
-	return fs_file;
+	if (fd == -1) {
+		mail_storage_set_critical(&file->storage->storage,
+			"open(%s, O_CREAT) failed: %m", path);
+	} else if (perm.file_create_gid == (gid_t)-1) {
+		/* no group change */
+	} else if (fchown(fd, (uid_t)-1, perm.file_create_gid) < 0) {
+		if (errno == EPERM) {
+			mail_storage_set_critical(&file->storage->storage, "%s",
+				eperm_error_get_chgrp("fchown", path,
+					perm.file_create_gid,
+					perm.file_create_gid_origin));
+		} else {
+			mail_storage_set_critical(&file->storage->storage,
+				"fchown(%s, -1, %ld) failed: %m",
+				path, (long)perm.file_create_gid);
+		}
+		/* continue anyway */
+	}
+	return fd;
 }
