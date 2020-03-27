@@ -255,7 +255,7 @@
 
 #endif
 
-// #define NDEBUG 0
+#define NDEBUG 0
 #ifdef NDEBUG
 #define FUNC_START() ((void)0)
 #define FUNC_IN() ((void)0)
@@ -267,5 +267,5 @@
 #define FUNC_IN()			i_debug("%s:%d %s() in", __FILE__, __LINE__, __FUNCTION__)
 #define FUNC_END()			i_debug("%s:%d %s() end", __FILE__, __LINE__, __FUNCTION__)
 #define FUNC_END_RET(r)		i_debug("%s:%d %s() return %s", __FILE__, __LINE__, __FUNCTION__, r)
-#define FUNC_END_RET_INT(r)	i_debug("%s:%d %s() return %d", __FILE__, __LINE__, __FUNCTION__, r)
+#define FUNC_END_RET_INT(r)	i_debug("%s:%d %s() return %d", __FILE__, __LINE__, __FUNCTION__, (int)r)
 #endif

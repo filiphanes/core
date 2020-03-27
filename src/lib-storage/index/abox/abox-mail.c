@@ -5,6 +5,7 @@
 #include "istream.h"
 #include "str.h"
 #include "index-mail.h"
+#include "index-pop3-uidl.h"
 #include "index-storage.h"
 #include "abox-mail.h"
 #include "abox-storage.h"
@@ -168,8 +169,8 @@ int abox_mail_get_virtual_size(struct mail *_mail, uoff_t *size_r)
 		FUNC_END_RET_INT(0);
 		return 0;
 	}
-	if (abox_mail_metadata_get(mail, ABOX_METADATA_VIRTUAL_SIZE,
-				   &value) < 0) {
+	if (abox_mail_metadata_get(mail,
+							   ABOX_METADATA_VIRTUAL_SIZE, &value) < 0) {
 		FUNC_END_RET_INT(-1);
 		return -1;
 	}
@@ -178,7 +179,7 @@ int abox_mail_get_virtual_size(struct mail *_mail, uoff_t *size_r)
 		return index_mail_get_virtual_size(_mail, size_r);
 	}
 	if (str_to_uintmax(value, &size) < 0 || size > (uoff_t)-1) {
-		i_warning("Error parsing " ABOX_METADATA_VIRTUAL_SIZE "=%s to uint", value);
+		i_warning("Error "ABOX_METADATA_VIRTUAL_SIZE"=%s is not uint", value);
 		return -1;
 	}
 	*size_r = data->virtual_size = (uoff_t)size;

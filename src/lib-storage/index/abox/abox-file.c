@@ -89,7 +89,6 @@ struct abox_file *abox_file_init(struct abox_mailbox *mbox, guid_128_t guid)
 int abox_file_open(struct abox_file *file, bool *notfound_r)
 {
 	FUNC_START();
-
 	*notfound_r = FALSE;
 	if (file->input != NULL)
 		return 1;
@@ -97,12 +96,26 @@ int abox_file_open(struct abox_file *file, bool *notfound_r)
 	if (file->fs_file == NULL) {
 		T_BEGIN {
 			file->fs_file = fs_file_init(file->storage->mail_fs,
-								file->primary_path, FS_OPEN_MODE_REPLACE);
+								file->primary_path, FS_OPEN_MODE_READONLY);
 		} T_END;
 	}
 
 	file->input = fs_read_stream(file->fs_file, ABOX_READ_BLOCK_SIZE);
-	/* TODO: *notfound_r = TRUE; */
+	// (void)i_stream_read(file->input);
+	if (file->input->stream_errno != 0) {
+		i_debug("abox_file_open: stream_errno=%u", file->input->stream_errno);
+		if (file->input->stream_errno == ENOENT) {
+			*notfound_r = TRUE;
+			FUNC_END_RET_INT(1);
+			return 1;
+		}
+		mail_storage_set_critical(&file->storage->storage,
+						"open(%s) failed: %s %m", file->primary_path,
+						i_stream_get_error(file->input));
+		FUNC_END_RET_INT(-1);
+		return -1;
+	}
+	FUNC_END_RET_INT(1);
 	return 1;
 }
 
@@ -315,8 +328,6 @@ int abox_file_get_append_stream(struct abox_file_append_context *ctx,
 				struct ostream **output_r)
 {
 	FUNC_START();
-	struct abox_file *file = ctx->file;
-	struct stat st;
 
 	if (ctx->output == NULL) {
 		/* file creation had failed */
@@ -333,16 +344,7 @@ const char *abox_file_metadata_get(struct abox_file *file, const char * key)
 {
 	FUNC_START();
 	const char *value = NULL;
-	struct stat st;
-
 	fs_lookup_metadata(file->fs_file, key, &value);
-
-	if (value == NULL) {
-		if (strcmp(ABOX_METADATA_VIRTUAL_SIZE, key) == 0 &&
-			fs_stat(file->fs_file, &st) >= 0) {
-			value = i_strdup_printf("%llu", st.st_size);
-		}
-	}
 	FUNC_END_RET(value);
 	return value;
 }
@@ -362,10 +364,12 @@ uoff_t abox_file_get_plaintext_size(struct abox_file *file)
 		FUNC_IN();
 		/* no. that means we can use the size from fs_stat */
 		if (fs_stat(file->fs_file, &st) < 0) {
-			i_error("");
+			i_error("abox_file_get_plaintext_size: fs_stat failed");
 		}
+		FUNC_END_RET_INT(st.st_size);
 		return (uoff_t)st.st_size;
 	}
+	FUNC_END_RET_INT(st.st_size);
 	return (uoff_t)size;
 }
 

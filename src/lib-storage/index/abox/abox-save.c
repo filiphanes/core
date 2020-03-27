@@ -112,6 +112,8 @@ int abox_save_begin(struct mail_save_context *_ctx, struct istream *input)
 	mail_set_seq_saving(_ctx->dest_mail, ctx->seq);
 
 	crlf_input = i_stream_create_lf(input);
+	/* crlf_input = i_stream_create_crlf_full(input,
+			ctx->mbox->storage->storage.set->mail_save_crlf); */
 	ctx->input = index_mail_cache_parse_init(_ctx->dest_mail, crlf_input);
 	i_stream_unref(&crlf_input);
 
@@ -268,7 +270,6 @@ static int abox_save_mail_write_metadata(struct mail_save_context *_ctx,
 	struct abox_save_context *ctx = ABOX_SAVECTX(_ctx);
 	uoff_t message_size;
 	guid_128_t guid_128;
-	unsigned int i, count;
 
 	message_size = ctx->abox_output->offset -
 		file->msg_header_size - file->file_header_size;
@@ -306,7 +307,7 @@ static int abox_save_finish_write(struct mail_save_context *_ctx)
 
 		index_mail_cache_add(mail, MAIL_CACHE_SAVE_DATE, &t, sizeof(t));
 	}
-	abox_save_end(&ctx->ctx);
+	abox_save_end(ctx);
 
 	files = array_back_modifiable(&ctx->files);
 	if (!ctx->failed) T_BEGIN {
@@ -408,7 +409,7 @@ int abox_transaction_save_commit_pre(struct mail_save_context *_ctx)
 	}
 
 	/* update abox header flags */
-	abox_save_update_header_flags(&ctx->ctx, ctx->sync_ctx->sync_view,
+	abox_save_update_header_flags(ctx, ctx->sync_ctx->sync_view,
 		ctx->mbox->hdr_ext_id, offsetof(struct abox_index_header, flags));
 
 	/* assign UIDs for new messages */

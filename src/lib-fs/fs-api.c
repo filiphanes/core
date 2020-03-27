@@ -771,6 +771,7 @@ struct istream *fs_read_stream(struct fs_file *file, size_t max_buffer_size)
 
 	if ((file->flags & FS_OPEN_FLAG_ASYNC) == 0 && !input->blocking) {
 		/* read the whole input stream before returning */
+		i_debug("fs_read_stream: read the whole input stream before returning, blocking=%i", input->blocking);
 		while ((ret = i_stream_read_more(input, &data, &size)) >= 0) {
 			i_stream_skip(input, size);
 			if (ret == 0)

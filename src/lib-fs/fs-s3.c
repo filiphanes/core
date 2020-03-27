@@ -4,6 +4,7 @@
 #include "buffer.h"
 #include "str.h"
 #include "guid.h"
+#include "ioloop.h"
 #include "istream.h"
 #include "ostream.h"
 #include "time-util.h"
@@ -17,7 +18,7 @@
 
 #define FS_HTTP_META_PREFIX "x-amz-meta-"
 
-struct http_client *fs_s3_client = NULL;
+struct http_client *fs_s3_http_client = NULL;
 
 struct http_fs {
 	struct fs fs;
@@ -30,18 +31,18 @@ struct http_fs {
 	bool have_dirs;
 };
 
-struct http_fs_file {
+struct s3_fs_file {
 	struct fs_file file;
 	pool_t pool;
 	struct http_client_request *request;
 	struct http_url *url;
-	struct istream *i_payload;
+	struct istream *payload;
+	struct io *io;
 	struct stat *st;
 	enum fs_open_mode open_mode;
 
-	buffer_t *write_buf;
-	int response_status;
-	string_t *response_data;
+	buffer_t *buffer;
+	int err;
 	fs_file_async_callback_t *callback;
 	void *callback_ctx;
 };
@@ -84,7 +85,8 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 		return -1;
 	}
 
-	query_params = t_strsplit_spaces(fs->url->enc_query, "&");
+	query_params = t_strsplit_spaces(
+		fs->url->enc_query != NULL ? fs->url->enc_query : "", "&");
 
 	for (tmp = query_params; *tmp != NULL; tmp++) {
 		arg = *tmp;
@@ -103,7 +105,7 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 		}
 	}
 
-	if (fs_s3_client != NULL)
+	if (fs_s3_http_client != NULL)
 		return 0;
 
 	/* Setup http client settings */
@@ -112,7 +114,6 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	http_set.max_idle_time_msecs = 5 * 1000;
 	http_set.max_parallel_connections = 10;
 	http_set.max_pipelined_requests = 10;
-	http_set.max_redirects = 1;
 	http_set.ssl = set->ssl_client_set;
 	http_set.dns_client = set->dns_client;
 
@@ -154,7 +155,7 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 			http_set.max_attempts = uint * 1000;
 		}
 	}
-	fs_s3_client = http_client_init(&http_set);
+	fs_s3_http_client = http_client_init(&http_set);
 
 	return 0;
 }
@@ -169,7 +170,7 @@ static void fs_s3_deinit(struct fs *_fs)
 	i_free(fs->root_path);
 	i_free(fs);
 
-	http_client_deinit(&fs_s3_client);
+	http_client_deinit(&fs_s3_http_client);
 }
 
 static enum fs_properties fs_s3_get_properties(struct fs *_fs)
@@ -193,11 +194,11 @@ static enum fs_properties fs_s3_get_properties(struct fs *_fs)
 static struct fs_file *fs_s3_file_alloc(void)
 {
 	FUNC_START();
-	struct http_fs_file *file;
+	struct s3_fs_file *file;
 	pool_t pool;
 
 	pool = pool_alloconly_create("fs http file", 1024);
-	file = p_new(pool, struct http_fs_file, 1);
+	file = p_new(pool, struct s3_fs_file, 1);
 	file->pool = pool;
 	return &file->file;
 }
@@ -207,29 +208,30 @@ fs_s3_file_init(struct fs_file *_file, const char *path,
 		   enum fs_open_mode mode, enum fs_open_flags flags ATTR_UNUSED)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 	struct http_fs *fs = container_of(_file->fs, struct http_fs, fs);
 	guid_128_t guid;
 
-	i_assert(mode != FS_OPEN_MODE_APPEND); /* not supported */
-	i_assert(mode != FS_OPEN_MODE_CREATE); /* not supported */
+	if (mode == FS_OPEN_MODE_APPEND || mode == FS_OPEN_MODE_CREATE) {
+		fs_set_error(_file->event, ENOTSUP, "APPEND or CREATE not supported");
+		return;
+	}
 
-	if (mode != FS_OPEN_MODE_CREATE_UNIQUE_128)
-		file->file.path = p_strdup(file->pool, path);
-	else {
+	if (mode == FS_OPEN_MODE_CREATE_UNIQUE_128) {
 		guid_128_generate(guid);
-		file->file.path = p_strdup_printf(file->pool, "%s/%s", path,
-						  guid_128_to_string(guid));
+		_file->path = p_strdup_printf(file->pool, "%s/%s", path,
+									  guid_128_to_string(guid));
+	} else {
+		_file->path = p_strdup(file->pool, path);
 	}
 
 	file->url = p_memdup(file->pool, fs->url, sizeof(struct http_url));
 	file->url->enc_query = NULL;
 	file->url->enc_fragment = NULL;
 	file->url->path = fs->path_prefix == NULL ?
-		p_strdup(file->pool, file->file.path) :
-		p_strconcat(file->pool, fs->path_prefix, file->file.path, NULL);
-	file->response_data = str_new(file->pool, 256);
+		p_strdup(file->pool, _file->path) :
+		p_strconcat(file->pool, fs->path_prefix, _file->path, NULL);
 	file->open_mode = mode;
 	file->st = p_new(file->pool, struct stat, 1);
 }
@@ -237,8 +239,8 @@ fs_s3_file_init(struct fs_file *_file, const char *path,
 static void fs_s3_file_deinit(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	i_assert(_file->output == NULL);
 
@@ -253,8 +255,8 @@ fs_s3_set_async_callback(struct fs_file *_file,
 		fs_file_async_callback_t *callback, void *context)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 	file->callback = callback;
 	file->callback_ctx = context;
 }
@@ -263,15 +265,15 @@ static void
 fs_s3_wait_async(struct fs *_fs ATTR_UNUSED)
 {
 	FUNC_START();
-	http_client_wait(fs_s3_client);
+	http_client_wait(fs_s3_http_client);
 }
 
 static void
 fs_s3_add_trace_headers(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 	struct http_fs *fs =
 		container_of(_file->fs, struct http_fs, fs);
 
@@ -294,8 +296,8 @@ static void
 fs_s3_add_metadata_headers(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 	const struct fs_metadata *metadata;
 	const char *val = NULL;
 	string_t *hdrkey = str_new(file->pool, 64);
@@ -323,22 +325,91 @@ fs_s3_add_metadata_headers(struct fs_file *_file)
 	str_free(&hdrkey);
 }
 
+/* Used for reading error response data for debugging */
 static void
-fs_s3_response_callback(const struct http_response *response,
-		    		 struct http_fs_file *file)
+read_response_payload(struct s3_fs_file *file)
 {
 	FUNC_START();
-	const struct http_header_field *field;
-	const ARRAY_TYPE(http_header_field) *header_fields;
 	const unsigned char *data;
-	const char *name;
 	size_t size;
+	int ret;
 
-	file->response_status = response->status;
-	if (response->status / 100 != 2) {
-		i_error("HTTP Response status: %u %s", response->status, response->reason);
+	if (file->payload == NULL) {
+		FUNC_END_RET("payload == NULL");
 		return;
 	}
+	FUNC_IN();
+	if (file->buffer == NULL) {
+		file->buffer = buffer_create_dynamic(file->pool, 64*1024);
+	}
+	FUNC_IN();
+	if (file->io == NULL){
+		buffer_set_used_size(file->buffer, 0);
+		i_stream_ref(file->payload);
+		file->io = io_add_istream(file->payload, read_response_payload, file);
+	}
+	FUNC_IN();
+	/* read payload */
+	while ((ret = i_stream_read_more(file->payload, &data, &size)) >= 0) {
+		buffer_append(file->buffer, data, size);
+		i_stream_skip(file->payload, size);
+	}
+
+	if (ret == 0) {
+		FUNC_IN();
+		/* we will be called again for more data */
+	} else {
+		FUNC_IN();
+		if (file->payload->stream_errno != 0) {
+			i_assert(ret < 0);
+			i_error("fs_s3: failed to read HTTP payload: %s",
+				i_stream_get_error(file->payload));
+		}
+		io_remove(&file->io);
+		i_stream_unref(&file->payload);
+	}
+	FUNC_END();
+}
+
+static void
+fs_s3_response_callback(const struct http_response *response,
+		    		 struct fs_file *_file)
+{
+	FUNC_START();
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
+	const struct http_header_field *field;
+	const ARRAY_TYPE(http_header_field) *header_fields;
+	const char *name;
+
+	i_debug("HTTP %u %s", response->status, response->reason);
+	switch (response->status) {
+	case 200: /* OK, usually on GET */
+	case 201: /* Created, usually on PUT */
+	case 202: /* Accepted, on DELETE */
+	case 204: /* No Content, PUT without change */
+	case 206: /* Partial Content, GET with range */
+		FUNC_IN();
+		file->err = 0;
+		break;
+	case 403: /* Forbidden */
+		file->err = EPERM;
+		break;
+	case 404: /* Not found */
+		file->err = ENOENT;
+		break;
+	case 405: /* Method Not Allowed */
+		file->err = ENOTSUP;
+		break;
+	default:
+		file->err = EIO;
+		break;
+	}
+	if (file->err > 0) {
+		fs_set_error(_file->event, file->err, "%u %s",
+					 response->status, response->reason);
+	}
+	FUNC_IN();
 
 	// Read metadata and st_size
 	header_fields = http_response_header_get_fields(response);
@@ -348,8 +419,7 @@ fs_s3_response_callback(const struct http_response *response,
 			fs_default_set_metadata(&file->file, name, field->value);
 		} else if (strcasecmp(field->name, "Content-Length") == 0) {
 			if (str_to_int64(field->value, &file->st->st_size) < 0) {
-				i_error("fs_s3: Content-Length is not int64: %s",
-						field->value);
+				i_error("fs_s3: Content-Length not int64: %s", field->value);
 			}
 		} else if (strcasecmp(field->name, "X-ObjectID") == 0) {
 			fs_default_set_metadata(&file->file,
@@ -357,21 +427,11 @@ fs_s3_response_callback(const struct http_response *response,
 		}
 	}
 
-	str_truncate(file->response_data, 0);
+	FUNC_IN();
+	/* Read payload to response->buffer */
+	file->payload = response->payload;
+	read_response_payload(file);
 
-	if (response->payload == NULL) {
-		return;
-	}
-
-	file->response_data = buffer_create_dynamic(file->pool, 256);
-	while ((i_stream_read_more(response->payload, &data, &size)) > 0) {
-		str_append_data(file->response_data, data, size);
-		i_stream_skip(response->payload, size);
-	}
-
-	if (file->callback != NULL) {
-		file->callback(file->callback_ctx);
-	}
 	file->request = NULL;
 	FUNC_END();
 }
@@ -379,54 +439,60 @@ fs_s3_response_callback(const struct http_response *response,
 static int fs_s3_open_for_read(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	i_assert(_file->output == NULL);
 
-	if (file->request != NULL)
+	if (file->request != NULL) {
 		return 0;
-
-	file->response_status = 0;
-	file->request = http_client_request_url(fs_s3_client,
-			"GET", file->url, fs_s3_response_callback, file);
+	}
+	file->err = -1;
+	file->request = http_client_request_url(fs_s3_http_client,
+			"GET", file->url, fs_s3_response_callback, _file);
 
 	fs_s3_add_trace_headers(_file);
 	http_client_request_submit(file->request);
 
+	FUNC_END_RET_INT(0);
 	return 0;
 }
 
 static bool fs_s3_prefetch(struct fs_file *_file, uoff_t length ATTR_UNUSED)
 {
 	FUNC_START();
-	return fs_s3_open_for_read(_file) < 0;
+	return TRUE;
 }
 
 static struct istream *
 fs_s3_read_stream(struct fs_file *_file, size_t max_buffer_size)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	fs_s3_open_for_read(_file);
-	// TODO: return non-blocking stream from http response
-	http_client_wait(fs_s3_client);
+	FUNC_IN();
+	http_client_wait(fs_s3_http_client);
 
-	if (file->response_status / 100 == 2) {
-		file->i_payload = i_stream_create_from_buffer(file->response_data);
-	} else {
-		file->i_payload = i_stream_create_error_str(errno, "%s",
-								fs_file_last_error(_file));
+	i_assert(file->err >= -1);
+
+	if (file->err > 0) {
+		FUNC_IN();
+		i_debug("fs_s3_read_stream: status=%d", file->err);
+		file->payload = i_stream_create_error(file->err);
 	}
 
-	i_stream_set_max_buffer_size(file->i_payload, max_buffer_size);
-	i_stream_set_name(file->i_payload, file->url->path);
-	return file->i_payload;
+	FUNC_IN();
+	i_assert(file->buffer != NULL);
+	file->payload = i_stream_create_from_buffer(file->buffer);
+	i_stream_set_max_buffer_size(file->payload, max_buffer_size);
+	i_stream_set_name(file->payload, file->url->path);
+	return file->payload;
+	FUNC_END_RET(file->url->path);
 }
 
-static void fs_s3_write_rename_if_needed(struct http_fs_file *file)
+static void fs_s3_write_rename_if_needed(struct s3_fs_file *file)
 {
 	FUNC_START();
 	struct fs_file *_file = &file->file;
@@ -456,61 +522,56 @@ static void fs_s3_write_rename_if_needed(struct http_fs_file *file)
 static void fs_s3_write_stream(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	i_assert(_file->output == NULL);
 
-	// TODO: stream directly to http i_stream payload if possible
-	file->write_buf = buffer_create_dynamic(file->pool, 64*1024);
-	_file->output = o_stream_create_buffer(file->write_buf);
+	file->buffer = buffer_create_dynamic(file->pool, 64*1024);
+	_file->output = o_stream_create_buffer(file->buffer);
 
-	o_stream_set_name(_file->output, file->url->path);
-	file->response_status = 0;
+	o_stream_set_name(_file->output, _file->path);
 }
 
 static int fs_s3_write_stream_finish(struct fs_file *_file, bool success)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 	int ret = success ? 0 : -1;
 
 	if (file->request == NULL) {
 		i_assert(file->open_mode != FS_OPEN_MODE_READONLY);
-
 		fs_s3_write_rename_if_needed(file);
-
-		/* Create and submit request */
 		o_stream_destroy(&_file->output);
 
-		file->response_status = 0;
-		file->request = http_client_request_url(fs_s3_client,
-			"PUT", file->url, fs_s3_response_callback, file);
+		/* Create and submit request */
+		file->err = -1;
+		file->request = http_client_request_url(fs_s3_http_client,
+			"PUT", file->url, fs_s3_response_callback, _file);
 		fs_s3_add_trace_headers(_file);
 		fs_s3_add_metadata_headers(_file);
-		// TODO: maybe implement 100 Continue
+
 		http_client_request_set_payload_data(file->request,
-				file->write_buf->data, file->write_buf->used);
+				file->buffer->data, file->buffer->used);
 		http_client_request_submit(file->request);
-		buffer_free(&file->write_buf);
+		buffer_free(&file->buffer);
 	}
 
-	while (file->response_status <= 0) {
+	while (file->err < 0) {
 		if ((_file->flags & FS_OPEN_FLAG_ASYNC) != 0) {
 			errno = EAGAIN;
 			return -1;
 		}
 		/* block */
-		http_client_wait(fs_s3_client);
+		http_client_wait(fs_s3_http_client);
 	}
 
-	if (file->response_status / 100 == 2) {
-		ret = 1;
-	} else {
-		ret = -1;
-		fs_set_error(_file->event, EIO, "PUT %s returned status %d: %s",
-				file->url->path, file->response_status, str_c(file->response_data));
+	if (file->err > 0) {
+		fs_set_error(_file->event, file->err, "PUT %s returned %s %s",
+				file->url->path, fs_file_last_error(_file),
+				str_c(file->buffer));
+		return -1;
 	}
 
 	return ret < 0 ? -1 : 1;
@@ -519,77 +580,78 @@ static int fs_s3_write_stream_finish(struct fs_file *_file, bool success)
 static int fs_s3_stat(struct fs_file *_file, struct stat *st_r)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
-	int ret = 0;
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	i_assert(_file->output == NULL);
 
 	/* Fire request if we don't know size or request is not created */
 	if (file->st->st_size == 0 && file->request == NULL) {
 		FUNC_IN();
-		file->response_status = 0;
-		file->request = http_client_request_url(fs_s3_client,
-				"HEAD", file->url, fs_s3_response_callback, file);
+		file->err = -1;
+		file->request = http_client_request_url(fs_s3_http_client,
+				"HEAD", file->url, fs_s3_response_callback, _file);
 		FUNC_IN();
 		fs_s3_add_trace_headers(_file);
 		FUNC_IN();
 		http_client_request_submit(file->request);
 	}
 
-	while (file->response_status <= 0) {
+	while (file->err < 0) {
 		if ((_file->flags & FS_OPEN_FLAG_ASYNC) != 0) {
 			FUNC_IN();
 			errno = EAGAIN;
 			return -1;
 		}
 		/* block */
-		http_client_wait(fs_s3_client);
+		http_client_wait(fs_s3_http_client);
 	}
 
-	if (file->response_status / 100 != 2) {
-		ret = -1;
-		fs_set_error(_file->event, EIO, "HEAD %s returned status %d",
-				file->url->path, file->response_status);
-	} else {
-		FUNC_IN();
-		i_zero(st_r);
-		st_r->st_size = file->st->st_size;
+	if (file->err > 0) {
+		fs_set_error(_file->event, file->err, "HEAD %s returned %s",
+				file->url->path, fs_file_last_error(_file));
+		FUNC_END_RET_INT(-1);
+		return -1;
 	}
-	FUNC_END();
-
-	return ret;
+	i_zero(st_r);
+	st_r->st_size = file->st->st_size;
+	FUNC_END_RET_INT(0);
+	return 0;
 }
 
 static int fs_s3_delete(struct fs_file *_file)
 {
 	FUNC_START();
-	struct http_fs_file *file =
-		container_of(_file, struct http_fs_file, file);
+	struct s3_fs_file *file =
+		container_of(_file, struct s3_fs_file, file);
 
 	if (file->request == NULL) {
-		file->response_status = 0;
-		file->request = http_client_request_url(fs_s3_client,
-				"DELETE", file->url, fs_s3_response_callback, file);
+		file->err = -1;
+		file->request = http_client_request_url(fs_s3_http_client,
+				"DELETE", file->url, fs_s3_response_callback, _file);
 		fs_s3_add_trace_headers(_file);
 		http_client_request_submit(file->request);
 	}
 
-	while (file->response_status <= 0) {
+	while (file->err < 0) {
 		if ((_file->flags & FS_OPEN_FLAG_ASYNC) != 0) {
 			errno = EAGAIN;
+			FUNC_END_RET_INT(-1);
 			return -1;
 		}
 		/* block */
-		http_client_wait(fs_s3_client);
+		http_client_wait(fs_s3_http_client);
 	}
 
-	if (file->response_status / 100 != 2) {
-		fs_set_error(_file->event, EIO, "HEAD %s returned status %d: %s",
-				file->url->path, file->response_status, str_c(file->response_data));
+	if (file->err > 0) {
+		fs_set_error(_file->event, file->err, "DELETE %s returned %s %s",
+				file->url->path, fs_file_last_error(_file),
+				str_c(file->buffer));
+		FUNC_END_RET_INT(-1);
 		return -1;
 	}
 
+	FUNC_END_RET_INT(0);
 	return 0;
 }
 
