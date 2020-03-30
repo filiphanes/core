@@ -81,7 +81,6 @@ static int abox_mail_file_set(struct abox_mail *mail)
 						 _mail->seq);
 		mail->open_file->refcount++;
 
-		/* it doesn't have input stream yet */
 		ret = abox_file_open(mail->open_file, &deleted);
 		if (ret <= 0) {
 			mail_set_critical(_mail,

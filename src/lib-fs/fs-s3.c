@@ -244,9 +244,21 @@ static void fs_s3_file_deinit(struct fs_file *_file)
 
 	i_assert(_file->output == NULL);
 
+	if (file->buffer != NULL) {
+		buffer_free(&file->buffer);
+	}
 	fs_file_free(_file);
-	FUNC_IN();
 	pool_unref(&file->pool);
+	FUNC_END();
+}
+
+static void fs_s3_file_close(struct fs_file *_file)
+{
+	FUNC_START();
+	struct s3_fs_file *file = container_of(_file, struct s3_fs_file, file);
+	if (file->payload != NULL) {
+		// i_stream_destroy(&file->payload);
+	}
 	FUNC_END();
 }
 
@@ -429,6 +441,7 @@ fs_s3_response_callback(const struct http_response *response,
 
 	FUNC_IN();
 	/* Read payload to response->buffer */
+	i_assert(file->payload == NULL);
 	file->payload = response->payload;
 	read_response_payload(file);
 
@@ -475,21 +488,24 @@ fs_s3_read_stream(struct fs_file *_file, size_t max_buffer_size)
 	FUNC_IN();
 	http_client_wait(fs_s3_http_client);
 
-	i_assert(file->err >= -1);
+	i_assert(file->payload == NULL);
 
 	if (file->err > 0) {
-		FUNC_IN();
 		i_debug("fs_s3_read_stream: status=%d", file->err);
 		file->payload = i_stream_create_error(file->err);
+	} else if (file->buffer == NULL) {
+		i_debug("fs_s3_read_stream: file->buffer == NULL");
+		file->payload = i_stream_create_error(file->err);
+	} else {
+		FUNC_IN();
+		file->payload = i_stream_create_from_buffer(file->buffer);
+		i_stream_set_max_buffer_size(file->payload, max_buffer_size);
+		i_stream_set_name(file->payload, file->url->path);
+		FUNC_END_RET(file->url->path);
 	}
 
-	FUNC_IN();
-	i_assert(file->buffer != NULL);
-	file->payload = i_stream_create_from_buffer(file->buffer);
-	i_stream_set_max_buffer_size(file->payload, max_buffer_size);
-	i_stream_set_name(file->payload, file->url->path);
+	FUNC_END();
 	return file->payload;
-	FUNC_END_RET(file->url->path);
 }
 
 static void fs_s3_write_rename_if_needed(struct s3_fs_file *file)
@@ -586,7 +602,7 @@ static int fs_s3_stat(struct fs_file *_file, struct stat *st_r)
 	i_assert(_file->output == NULL);
 
 	/* Fire request if we don't know size or request is not created */
-	if (file->st->st_size == 0 && file->request == NULL) {
+	if (file->st->st_size == NULL && file->request == NULL) {
 		FUNC_IN();
 		file->err = -1;
 		file->request = http_client_request_url(fs_s3_http_client,
@@ -769,7 +785,7 @@ const struct fs fs_class_s3 = {
 		fs_s3_file_alloc,
 		fs_s3_file_init,
 		fs_s3_file_deinit,
-		NULL /* file_close */,
+		fs_s3_file_close,
 		NULL /* get_path */,
 		fs_s3_set_async_callback,
 		fs_s3_wait_async,

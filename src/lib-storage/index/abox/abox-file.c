@@ -173,7 +173,6 @@ void abox_file_free(struct abox_file *file)
 
 	i_assert(file->refcount == 0);
 
-	pool_unref(&file->metadata_pool);
 	abox_file_close(file);
 	i_free(file->primary_path);
 	i_free(file->alt_path);

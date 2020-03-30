@@ -20,11 +20,6 @@ struct abox_file {
 	uoff_t cur_offset;
 	uoff_t cur_physical_size;
 
-	/* Metadata for the currently seeked metadata block. */
-	pool_t metadata_pool;
-	ARRAY(const char *) metadata;
-	uoff_t metadata_read_offset;
-
 	bool appending:1;
 	bool corrupted:1;
 
