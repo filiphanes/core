@@ -273,7 +273,7 @@ mail_index_need_sync(struct mail_index *index, enum mail_index_sync_flags flags,
 	    hdr->log_file_seq < log_file_seq)
 		return TRUE;
 
-	if (index->need_recreate)
+	if (index->need_recreate != NULL)
 		return TRUE;
 
 	/* already synced */
@@ -366,7 +366,7 @@ mail_index_sync_begin_init(struct mail_index *index,
 	}
 
 	if (!mail_index_need_sync(index, flags, log_file_seq, log_file_offset) &&
-	    !index->index_deleted && !index->need_recreate) {
+	    !index->index_deleted && index->need_recreate == NULL) {
 		if (locked)
 			mail_transaction_log_sync_unlock(index->log, "syncing determined unnecessary");
 		return 0;
@@ -830,7 +830,7 @@ mail_index_sync_update_mailbox_offset(struct mail_index_sync_ctx *ctx)
 	}
 }
 
-static bool mail_index_sync_want_index_write(struct mail_index *index)
+static bool mail_index_sync_want_index_write(struct mail_index *index, const char **reason_r)
 {
 	uint32_t log_diff;
 
@@ -839,18 +839,35 @@ static bool mail_index_sync_want_index_write(struct mail_index *index)
 		/* dovecot.index points to an old .log file. we were supposed
 		   to rewrite the dovecot.index when rotating the log, so
 		   we shouldn't usually get here. */
+		*reason_r = "points to old .log file";
 		return TRUE;
 	}
 
 	log_diff = index->map->hdr.log_file_tail_offset -
 		index->last_read_log_file_tail_offset;
-	if (log_diff > index->optimization_set.index.rewrite_max_log_bytes ||
-	    (index->index_min_write &&
-	     log_diff > index->optimization_set.index.rewrite_min_log_bytes))
+	if (log_diff > index->optimization_set.index.rewrite_max_log_bytes) {
+		*reason_r = t_strdup_printf(
+			".log read %u..%u > rewrite_max_log_bytes %"PRIuUOFF_T,
+			index->map->hdr.log_file_tail_offset,
+			index->last_read_log_file_tail_offset,
+			index->optimization_set.index.rewrite_max_log_bytes);
 		return TRUE;
+	}
+	if (index->index_min_write &&
+	    log_diff > index->optimization_set.index.rewrite_min_log_bytes) {
+		*reason_r = t_strdup_printf(
+			".log read %u..%u > rewrite_min_log_bytes %"PRIuUOFF_T,
+			index->map->hdr.log_file_tail_offset,
+			index->last_read_log_file_tail_offset,
+			index->optimization_set.index.rewrite_min_log_bytes);
+		return TRUE;
+	}
 
-	if (index->need_recreate)
+	if (index->need_recreate != NULL) {
+		*reason_r = t_strdup_printf("Need to recreate index: %s",
+					    index->need_recreate);
 		return TRUE;
+	}
 	return FALSE;
 }
 
@@ -859,6 +876,7 @@ int mail_index_sync_commit(struct mail_index_sync_ctx **_ctx)
         struct mail_index_sync_ctx *ctx = *_ctx;
 	struct mail_index *index = ctx->index;
 	struct mail_cache_compress_lock *cache_lock = NULL;
+	const char *reason = NULL;
 	uint32_t next_uid;
 	bool want_rotate, index_undeleted, delete_index;
 	int ret = 0, ret2;
@@ -956,12 +974,12 @@ int mail_index_sync_commit(struct mail_index_sync_ctx **_ctx)
 	   However, it's still safe to do the rotation because external
 	   transactions don't require syncing. */
 	want_rotate = ctx->fully_synced &&
-		mail_transaction_log_want_rotate(index->log);
+		mail_transaction_log_want_rotate(index->log, &reason);
 	if (ret == 0 &&
-	    (want_rotate || mail_index_sync_want_index_write(index))) {
-		index->need_recreate = FALSE;
+	    (want_rotate || mail_index_sync_want_index_write(index, &reason))) {
+		i_free(index->need_recreate);
 		index->index_min_write = FALSE;
-		mail_index_write(index, want_rotate);
+		mail_index_write(index, want_rotate, reason);
 	}
 	mail_index_sync_end(_ctx);
 	return ret;
@@ -1019,11 +1037,19 @@ void mail_index_sync_set_corrupted(struct mail_index_sync_map_ctx *ctx,
 	va_list va;
 	uint32_t seq;
 	uoff_t offset;
+	char *reason, *reason_free = NULL;
+
+	va_start(va, fmt);
+	reason = reason_free = i_strdup_vprintf(fmt, va);
+	va_end(va);
 
 	ctx->errors = TRUE;
 	/* make sure we don't get to this same error again by updating the
 	   dovecot.index */
-	ctx->view->index->need_recreate = TRUE;
+	if (ctx->view->index->need_recreate == NULL) {
+		ctx->view->index->need_recreate = reason;
+		reason_free = NULL;
+	}
 
 	mail_transaction_log_view_get_prev_pos(ctx->view->log_view,
 					       &seq, &offset);
@@ -1032,16 +1058,12 @@ void mail_index_sync_set_corrupted(struct mail_index_sync_map_ctx *ctx,
 	    (seq == ctx->view->index->fsck_log_head_file_seq &&
 	     offset < ctx->view->index->fsck_log_head_file_offset)) {
 		/* be silent */
-		return;
-	}
-
-	va_start(va, fmt);
-	T_BEGIN {
+	} else {
 		mail_index_set_error(ctx->view->index,
 				     "Log synchronization error at "
 				     "seq=%u,offset=%"PRIuUOFF_T" for %s: %s",
 				     seq, offset, ctx->view->index->filepath,
-				     t_strdup_vprintf(fmt, va));
-	} T_END;
-	va_end(va);
+				     reason);
+	}
+	i_free(reason_free);
 }
