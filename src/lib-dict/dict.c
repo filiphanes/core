@@ -3,8 +3,22 @@
 #include "lib.h"
 #include "array.h"
 #include "llist.h"
+#include "ioloop.h"
 #include "str.h"
+#include "ioloop.h"
 #include "dict-private.h"
+
+struct dict_commit_callback_ctx {
+	struct dict *dict;
+	dict_transaction_commit_callback_t *callback;
+	void *context;
+};
+
+struct dict_lookup_callback_ctx {
+	struct dict *dict;
+	dict_lookup_callback_t *callback;
+	void *context;
+};
 
 static ARRAY(struct dict *) dict_drivers;
 
@@ -84,8 +98,27 @@ int dict_init(const char *uri, const struct dict_settings *set,
 		return -1;
 	}
 	i_assert(*dict_r != NULL);
+	(*dict_r)->refcount++;
 
 	return 0;
+}
+
+static void dict_ref(struct dict *dict)
+{
+	i_assert(dict->refcount > 0);
+
+	dict->refcount++;
+}
+
+static void dict_unref(struct dict **_dict)
+{
+	struct dict *dict = *_dict;
+	*_dict = NULL;
+	if (dict == NULL)
+		return;
+	i_assert(dict->refcount > 0);
+	if (--dict->refcount == 0)
+		dict->v.deinit(dict);
 }
 
 void dict_deinit(struct dict **_dict)
@@ -97,8 +130,7 @@ void dict_deinit(struct dict **_dict)
 	i_assert(dict->iter_count == 0);
 	i_assert(dict->transaction_count == 0);
 	i_assert(dict->transactions == NULL);
-
-	dict->v.deinit(dict);
+	dict_unref(&dict);
 }
 
 void dict_wait(struct dict *dict)
@@ -119,6 +151,56 @@ static bool dict_key_prefix_is_valid(const char *key)
 {
 	return str_begins(key, DICT_PATH_SHARED) ||
 		str_begins(key, DICT_PATH_PRIVATE);
+}
+
+void dict_pre_api_callback(struct dict *dict)
+{
+	if (dict->prev_ioloop != NULL) {
+		/* Don't let callback see that we've created our
+		   internal ioloop in case it wants to add some ios
+		   or timeouts. */
+		io_loop_set_current(dict->prev_ioloop);
+	}
+}
+
+void dict_post_api_callback(struct dict *dict)
+{
+	if (dict->prev_ioloop != NULL) {
+		io_loop_set_current(dict->ioloop);
+		io_loop_stop(dict->ioloop);
+	}
+}
+
+static void
+dict_lookup_callback(const struct dict_lookup_result *result,
+		     void *context)
+{
+	struct dict_lookup_callback_ctx *ctx = context;
+
+	dict_pre_api_callback(ctx->dict);
+	ctx->callback(result, ctx->context);
+	dict_post_api_callback(ctx->dict);
+
+	dict_unref(&ctx->dict);
+	i_free(ctx);
+}
+
+static void dict_commit_callback(const struct dict_commit_result *result,
+				 void *context)
+{
+	struct dict_commit_callback_ctx *ctx = context;
+
+	i_assert(result->ret >= 0 || result->error != NULL);
+	dict_pre_api_callback(ctx->dict);
+	if (ctx->callback != NULL)
+		ctx->callback(result, ctx->context);
+	else if (result->ret < 0)
+		i_error("dict(%s): Commit failed: %s",
+			ctx->dict->name, result->error);
+	dict_post_api_callback(ctx->dict);
+
+	dict_unref(&ctx->dict);
+	i_free(ctx);
 }
 
 int dict_lookup(struct dict *dict, pool_t pool, const char *key,
@@ -142,7 +224,13 @@ void dict_lookup_async(struct dict *dict, const char *key,
 		callback(&result, context);
 		return;
 	}
-	dict->v.lookup_async(dict, key, callback, context);
+	struct dict_lookup_callback_ctx *lctx =
+		i_new(struct dict_lookup_callback_ctx, 1);
+	lctx->dict = dict;
+	dict_ref(lctx->dict);
+	lctx->callback = callback;
+	lctx->context = context;
+	dict->v.lookup_async(dict, key, dict_lookup_callback, lctx);
 }
 
 struct dict_iterate_context *
@@ -279,6 +367,8 @@ dict_transaction_commit_sync_callback(const struct dict_commit_result *result,
 int dict_transaction_commit(struct dict_transaction_context **_ctx,
 			    const char **error_r)
 {
+	struct dict_commit_callback_ctx *cctx =
+		i_new(struct dict_commit_callback_ctx, 1);
 	struct dict_transaction_context *ctx = *_ctx;
 	struct dict_commit_sync_result result;
 
@@ -288,8 +378,12 @@ int dict_transaction_commit(struct dict_transaction_context **_ctx,
 	i_assert(ctx->dict->transaction_count > 0);
 	ctx->dict->transaction_count--;
 	DLLIST_REMOVE(&ctx->dict->transactions, ctx);
-	ctx->dict->v.transaction_commit(ctx, FALSE,
-		dict_transaction_commit_sync_callback, &result);
+	cctx->dict = ctx->dict;
+	dict_ref(cctx->dict);
+	cctx->callback = dict_transaction_commit_sync_callback;
+	cctx->context = &result;
+
+	ctx->dict->v.transaction_commit(ctx, FALSE, dict_commit_callback, cctx);
 	*error_r = t_strdup(result.error);
 	i_free(result.error);
 	return result.ret;
@@ -299,6 +393,8 @@ void dict_transaction_commit_async(struct dict_transaction_context **_ctx,
 				   dict_transaction_commit_callback_t *callback,
 				   void *context)
 {
+	struct dict_commit_callback_ctx *cctx =
+		i_new(struct dict_commit_callback_ctx, 1);
 	struct dict_transaction_context *ctx = *_ctx;
 
 	*_ctx = NULL;
@@ -307,7 +403,12 @@ void dict_transaction_commit_async(struct dict_transaction_context **_ctx,
 	DLLIST_REMOVE(&ctx->dict->transactions, ctx);
 	if (callback == NULL)
 		callback = dict_transaction_commit_async_noop_callback;
-	ctx->dict->v.transaction_commit(ctx, TRUE, callback, context);
+	cctx->dict = ctx->dict;
+	dict_ref(cctx->dict);
+	cctx->callback = callback;
+	cctx->context = context;
+
+	ctx->dict->v.transaction_commit(ctx, TRUE, dict_commit_callback, cctx);
 }
 
 void dict_transaction_rollback(struct dict_transaction_context **_ctx)
