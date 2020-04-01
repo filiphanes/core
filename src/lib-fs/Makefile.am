@@ -4,7 +4,6 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/src/lib \
 	-I$(top_srcdir)/src/lib-test \
 	-I$(top_srcdir)/src/lib-dict \
-	-I$(top_srcdir)/src/lib-http \
 	-I$(top_srcdir)/src/lib-ssl-iostream \
 	-DMODULE_DIR=\""$(moduledir)"\"
 
@@ -14,7 +13,6 @@ libfs_la_SOURCES = \
 	fs-metawrap.c \
 	fs-randomfail.c \
 	fs-posix.c \
-	fs-s3.c \
 	fs-test.c \
 	fs-test-async.c \
 	fs-sis.c \
@@ -51,8 +49,6 @@ test_programs = \
 test_deps = \
 	$(noinst_LTLIBRARIES) \
 	../lib-dict/libdict.la \
-	../lib-http/libhttp.la \
-	../lib-dns/libdns.la \
 	../lib-ssl-iostream/libssl_iostream.la \
 	../lib-test/libtest.la \
 	../lib/liblib.la

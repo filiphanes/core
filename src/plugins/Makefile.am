@@ -53,5 +53,6 @@ SUBDIRS = \
 	$(DICT_LDAP) \
 	$(APPARMOR) \
 	fs-compress \
+	fs-s3 \
 	var-expand-crypt \
 	charset-alias

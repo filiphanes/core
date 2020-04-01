@@ -255,8 +255,7 @@
 
 #endif
 
-#define NDEBUG 0
-#ifdef NDEBUG
+#ifndef DEBUG
 #define FUNC_START() ((void)0)
 #define FUNC_IN() ((void)0)
 #define FUNC_END() ((void)0)

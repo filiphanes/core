@@ -168,7 +168,7 @@ abox_mailbox_alloc(struct mail_storage *storage, struct mailbox_list *list,
 	/* abox can't work without index files */
 	flags &= ~MAILBOX_FLAG_NO_INDEX_FILES;
 
-	pool = pool_alloconly_create("abox mailbox", 1024*3);
+	pool = pool_alloconly_create("abox mailbox", 3*1024);
 	mbox = p_new(pool, struct abox_mailbox, 1);
 	mbox->box = abox_mailbox;
 	mbox->box.pool = pool;

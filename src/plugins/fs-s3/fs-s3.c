@@ -18,6 +18,8 @@
 
 #define FS_HTTP_META_PREFIX "x-amz-meta-"
 
+extern const struct fs fs_class_s3;
+
 struct http_client *fs_s3_http_client = NULL;
 
 struct http_fs {
