@@ -22,7 +22,7 @@ extern const struct fs fs_class_s3;
 
 struct http_client *fs_s3_http_client = NULL;
 
-struct http_fs {
+struct s3_fs {
 	struct fs fs;
 	char *root_path;
 	char *path_prefix;
@@ -49,18 +49,23 @@ struct s3_fs_file {
 	void *callback_ctx;
 };
 
-struct http_fs_iter {
+struct s3_fs_iter {
 	struct fs_iter iter;
-	char *path;
+	struct http_client_request *request;
+	struct http_url *url;
+	struct istream *payload;
+	buffer_t *buffer;
+	struct io *io;
+	const char *next;
 	int err;
 };
 
 static struct fs *fs_s3_alloc(void)
 {
 	FUNC_START();
-	struct http_fs *fs;
+	struct s3_fs *fs;
 
-	fs = i_new(struct http_fs, 1);
+	fs = i_new(struct s3_fs, 1);
 	fs->fs = fs_class_s3;
 	return &fs->fs;
 }
@@ -70,7 +75,7 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 	      const char **error_r)
 {
 	FUNC_START();
-	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
+	struct s3_fs *fs = container_of(_fs, struct s3_fs, fs);
 	struct http_client_settings http_set;
 	const char *error;
 	const char *const *tmp;
@@ -82,7 +87,7 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 
 	if (http_url_parse(args, NULL, HTTP_URL_ALLOW_USERINFO_PART,
 						default_pool, &fs->url, &error) < 0) {
-		*error_r = t_strdup_printf("http_fs error while parsing settings url"
+		*error_r = t_strdup_printf("s3_fs error while parsing settings url"
 					" '%s': %s", args, error);
 		return -1;
 	}
@@ -165,7 +170,7 @@ fs_s3_init(struct fs *_fs, const char *args, const struct fs_settings *set,
 static void fs_s3_deinit(struct fs *_fs)
 {
 	FUNC_START();
-	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
+	struct s3_fs *fs = container_of(_fs, struct s3_fs, fs);
 
 	i_free(fs->url);
 	i_free(fs->path_prefix);
@@ -178,7 +183,7 @@ static void fs_s3_deinit(struct fs *_fs)
 static enum fs_properties fs_s3_get_properties(struct fs *_fs)
 {
 	FUNC_START();
-	struct http_fs *fs = container_of(_fs, struct http_fs, fs);
+	struct s3_fs *fs = container_of(_fs, struct s3_fs, fs);
 	enum fs_properties props =
 		FS_PROPERTY_LOCKS | FS_PROPERTY_FASTCOPY | FS_PROPERTY_RENAME |
 		FS_PROPERTY_STAT | FS_PROPERTY_ITER | FS_PROPERTY_RELIABLEITER;
@@ -212,7 +217,7 @@ fs_s3_file_init(struct fs_file *_file, const char *path,
 	FUNC_START();
 	struct s3_fs_file *file =
 		container_of(_file, struct s3_fs_file, file);
-	struct http_fs *fs = container_of(_file->fs, struct http_fs, fs);
+	struct s3_fs *fs = container_of(_file->fs, struct s3_fs, fs);
 	guid_128_t guid;
 
 	if (mode == FS_OPEN_MODE_APPEND || mode == FS_OPEN_MODE_CREATE) {
@@ -288,8 +293,8 @@ fs_s3_add_trace_headers(struct fs_file *_file)
 	FUNC_START();
 	struct s3_fs_file *file =
 		container_of(_file, struct s3_fs_file, file);
-	struct http_fs *fs =
-		container_of(_file->fs, struct http_fs, fs);
+	struct s3_fs *fs =
+		container_of(_file->fs, struct s3_fs, fs);
 
 	if (fs->no_trace_headers)
 		return;
@@ -339,7 +344,7 @@ fs_s3_add_metadata_headers(struct fs_file *_file)
 	str_free(&hdrkey);
 }
 
-/* Used for reading error response data for debugging */
+/* Used for reading success and error response data */
 static void
 read_response_payload(struct s3_fs_file *file)
 {
@@ -385,6 +390,28 @@ read_response_payload(struct s3_fs_file *file)
 	FUNC_END();
 }
 
+static inline int
+fs_s3_response_status_err(unsigned int status)
+{
+	FUNC_START();
+	switch (status) {
+	case 200: /* OK, usually on GET */
+	case 201: /* Created, usually on PUT */
+	case 202: /* Accepted, on DELETE */
+	case 204: /* No Content, PUT without change */
+	case 206: /* Partial Content, GET with range */
+		FUNC_IN();
+		return 0;
+	case 403: /* Forbidden */
+		return EPERM;
+	case 404: /* Not found */
+		return ENOENT;
+	case 405: /* Method Not Allowed */
+		return ENOTSUP;
+	}
+	return EIO;
+}
+
 static void
 fs_s3_response_callback(const struct http_response *response,
 		    		 struct fs_file *_file)
@@ -396,34 +423,12 @@ fs_s3_response_callback(const struct http_response *response,
 	const ARRAY_TYPE(http_header_field) *header_fields;
 	const char *name;
 
-	i_debug("HTTP %u %s", response->status, response->reason);
-	switch (response->status) {
-	case 200: /* OK, usually on GET */
-	case 201: /* Created, usually on PUT */
-	case 202: /* Accepted, on DELETE */
-	case 204: /* No Content, PUT without change */
-	case 206: /* Partial Content, GET with range */
-		FUNC_IN();
-		file->err = 0;
-		break;
-	case 403: /* Forbidden */
-		file->err = EPERM;
-		break;
-	case 404: /* Not found */
-		file->err = ENOENT;
-		break;
-	case 405: /* Method Not Allowed */
-		file->err = ENOTSUP;
-		break;
-	default:
-		file->err = EIO;
-		break;
-	}
+	e_debug(_file->event, "HTTP %u %s", response->status, response->reason);
+	file->err = fs_s3_response_status_err(response->status);
 	if (file->err > 0) {
 		fs_set_error(_file->event, file->err, "%u %s",
 					 response->status, response->reason);
 	}
-	FUNC_IN();
 
 	// Read metadata and st_size
 	header_fields = http_response_header_get_fields(response);
@@ -514,7 +519,7 @@ static void fs_s3_write_rename_if_needed(struct s3_fs_file *file)
 {
 	FUNC_START();
 	struct fs_file *_file = &file->file;
-	struct http_fs *fs = container_of(_file->fs, struct http_fs, fs);
+	struct s3_fs *fs = container_of(_file->fs, struct s3_fs, fs);
 	const char *new_fname;
 
 	if (fs_lookup_metadata(_file, FS_METADATA_WRITE_FNAME, &new_fname) < 0) {
@@ -673,108 +678,131 @@ static int fs_s3_delete(struct fs_file *_file)
 	return 0;
 }
 
+static void read_iter_payload(struct s3_fs_iter *iter)
+{
+	FUNC_START();
+	const unsigned char *data;
+	size_t size;
+	int ret;
+
+	if (iter->payload == NULL) {
+		FUNC_END_RET("payload == NULL");
+		return;
+	}
+	FUNC_IN();
+	if (iter->io == NULL){
+		buffer_set_used_size(iter->buffer, 0);
+		i_stream_ref(iter->payload);
+		iter->io = io_add_istream(iter->payload, read_iter_payload, iter);
+	}
+	FUNC_IN();
+	/* read payload */
+	while ((ret = i_stream_read_more(iter->payload, &data, &size)) >= 0) {
+		buffer_append(iter->buffer, data, size);
+		i_stream_skip(iter->payload, size);
+	}
+
+	if (ret == 0) {
+		FUNC_IN();
+		/* we will be called again for more data */
+	} else {
+		FUNC_IN();
+		if (iter->payload->stream_errno != 0) {
+			i_assert(ret < 0);
+			i_error("fs_s3: failed to read HTTP payload: %s",
+				i_stream_get_error(iter->payload));
+		}
+		io_remove(&iter->io);
+		i_stream_unref(&iter->payload);
+	}
+	FUNC_END();
+}
+
+static
+void fs_s3_response_iter_callback(const struct http_response *response,
+		    		              struct fs_iter *_iter)
+{
+	FUNC_START();
+	struct s3_fs_iter *iter = container_of(_iter, struct s3_fs_iter, iter);
+
+	e_debug(_iter->event, "HTTP %u %s", response->status, response->reason);
+	iter->err = fs_s3_response_status_err(response->status);
+	if (iter->err > 0) {
+		fs_set_error(_iter->event, iter->err, "%u %s",
+					 response->status, response->reason);
+	}
+
+	FUNC_IN();
+	/* Read payload to response->buffer */
+	i_assert(iter->payload == NULL);
+	iter->payload = response->payload;
+	read_iter_payload(iter);
+
+	iter->request = NULL;
+	FUNC_END();
+}
+
 static struct fs_iter *fs_s3_iter_alloc(void)
 {
 	FUNC_START();
-	struct http_fs_iter *iter = i_new(struct http_fs_iter, 1);
+	struct s3_fs_iter *iter = i_new(struct s3_fs_iter, 1);
 	return &iter->iter;
 }
 
-// TODO: implement
 static void
 fs_s3_iter_init(struct fs_iter *_iter, const char *path,
-		   enum fs_iter_flags flags ATTR_UNUSED)
+		   enum fs_iter_flags flags)
 {
 	FUNC_START();
-/*
-	struct http_fs_iter *iter =
-		container_of(_iter, struct http_fs_iter, iter);
-
-	iter->path = i_strdup(path);
-	if (iter->path[0] == '\0') {
-		i_free(iter->path);
-		iter->path = i_strdup(".");
-	}
-	iter->dir = opendir(iter->path);
-	if (iter->dir == NULL && errno != ENOENT) {
-		iter->err = errno;
-		fs_set_error_errno(_iter->event,
-				   "opendir(%s) failed: %m", iter->path);
-	}
-*/
+	struct s3_fs_iter *iter = container_of(_iter, struct s3_fs_iter, iter);
+	struct s3_fs *fs = container_of(_iter->fs, struct s3_fs, fs);
+	iter->buffer = buffer_create_dynamic(default_pool, 4*1024);
+	iter->url = i_memdup(fs->url, sizeof(struct http_url));
+	iter->url->enc_query = i_strconcat("?prefix=", /*TODO:encode*/path, NULL);
+	iter->err = -1;
+	iter->request = http_client_request_url(fs_s3_http_client,
+			"GET", iter->url, fs_s3_response_iter_callback, _iter);
+	http_client_request_submit(iter->request);
+	http_client_wait(fs_s3_http_client);
+	FUNC_END();
 }
 
-// TODO: implement
-static bool fs_s3_iter_want(struct http_fs_iter *iter, const char *fname)
-{
-	FUNC_START();
-	bool ret;
-
-	T_BEGIN {
-/*
-		const char *path = t_strdup_printf("%s/%s", iter->path, fname);
-		struct stat st;
-
-		if (stat(path, &st) < 0 &&
-		    lstat(path, &st) < 0)
-			ret = FALSE;
-		else if (!S_ISDIR(st.st_mode))
-			ret = (iter->iter.flags & FS_ITER_FLAG_DIRS) == 0;
-		else
-			ret = (iter->iter.flags & FS_ITER_FLAG_DIRS) != 0;
-*/
-	} T_END;
-	return ret;
-}
-
-// TODO: implement
 static const char *fs_s3_iter_next(struct fs_iter *_iter)
 {
 	FUNC_START();
-/*
-	struct http_fs_iter *iter =
-		container_of(_iter, struct http_fs_iter, iter);
+	struct s3_fs_iter *iter =
+		container_of(_iter, struct s3_fs_iter, iter);
+	char *p;
+	const char *ret;
 
-	if (iter->dir == NULL)
+	if (iter->next == NULL) {
+		if (iter->buffer == NULL)
+			return NULL;
+		iter->next = str_c(iter->buffer);
+	}
+	if (iter->next[0] == '\0')
 		return NULL;
 
-	errno = 0;
-	for (; (d = readdir(iter->dir)) != NULL; errno = 0) {
-		if (strcmp(d->d_name, ".") == 0 ||
-		    strcmp(d->d_name, "..") == 0)
-			continue;
-		if (fs_s3_iter_want(iter, d->d_name))
-			return d->d_name;
+	ret = iter->next;
+	p = (char *)strchr(iter->next, '\n');
+	if (p == NULL) {
+		/* End of list */
+		iter->next = strchr(iter->next, '\0');
 	}
-	if (errno != 0) {
-		iter->err = errno;
-		fs_set_error_errno(_iter->event,
-				   "readdir(%s) failed: %m", iter->path);
-	}
-*/
-	return NULL;
+	p[0] = '\0';
+	iter->next = p + 1;
+
+	return ret;
 }
 
 static int fs_s3_iter_deinit(struct fs_iter *_iter)
 {
 	FUNC_START();
-	struct http_fs_iter *iter =
-		container_of(_iter, struct http_fs_iter, iter);
-	int ret = 0;
+	struct s3_fs_iter *iter = container_of(_iter, struct s3_fs_iter, iter);
 
-/*
-	if (iter->dir != NULL && closedir(iter->dir) < 0 && iter->err == 0) {
-		iter->err = errno;
-		fs_set_error_errno(_iter->event,
-				   "closedir(%s) failed: %m", iter->path);
-	}
-	if (iter->err != 0) {
-		errno = iter->err;
-		ret = -1;
-	}
-*/
-	i_free(iter->path);
-	return ret;
+	buffer_free(&iter->buffer);
+	i_free(iter->url->path);
+	return 0;
 }
 
 const struct fs fs_class_s3 = {
