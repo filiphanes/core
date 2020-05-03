@@ -30,12 +30,13 @@ mech_dovecot_token_auth_continue(struct auth_request *request,
 				username = (const char *)data + i;
 			else if (count == 3)
 				session_id = (const char *)data + i;
-			else {
+			else if (count == 4) {
 				len = data_size - i;
 				auth_token = p_strndup(unsafe_data_stack_pool,
 						       data+i, len);
-				break;
 			}
+			else
+				break;
 		}
 	}	
 
@@ -52,7 +53,7 @@ mech_dovecot_token_auth_continue(struct auth_request *request,
 			auth_token_get(service, pid, request->user, session_id);
 
 		if (auth_token != NULL &&
-		    strcmp(auth_token, valid_token) == 0) {
+		    str_equals_timing_almost_safe(auth_token, valid_token)) {
 			request->passdb_success = TRUE;
 			auth_request_set_field(request, "userdb_client_service", service, "");
 			auth_request_success(request, NULL, 0);

@@ -1,6 +1,6 @@
 /* Copyright (c) 2009-2018 Dovecot authors, see the included COPYING file */
 
-#include "lib.h"
+#include "stats-common.h"
 #include "buffer.h"
 #include "settings-parser.h"
 #include "service-settings.h"
@@ -110,6 +110,7 @@ static const struct setting_define stats_metric_setting_defines[] = {
 	{ SET_STRLIST, "filter", offsetof(struct stats_metric_settings, filter), NULL },
 	DEF(SET_STR, exporter),
 	DEF(SET_STR, exporter_include),
+	DEF(SET_STR, description),
 	SETTING_DEFINE_LIST_END
 };
 
@@ -122,6 +123,7 @@ static const struct stats_metric_settings stats_metric_default_settings = {
 	.exporter = "",
 	.group_by = "",
 	.exporter_include = "name hostname timestamps categories fields",
+	.description = "",
 };
 
 const struct setting_parser_info stats_metric_setting_parser_info = {
@@ -139,18 +141,25 @@ const struct setting_parser_info stats_metric_setting_parser_info = {
  * top-level settings
  */
 
+#undef DEF
+#define DEF(type, name) \
+	{ type, #name, offsetof(struct stats_settings, name), NULL }
 #undef DEFLIST_UNIQUE
 #define DEFLIST_UNIQUE(field, name, defines) \
 	{ SET_DEFLIST_UNIQUE, name, \
 	  offsetof(struct stats_settings, field), defines }
 
 static const struct setting_define stats_setting_defines[] = {
+	DEF(SET_STR, stats_http_rawlog_dir),
+
 	DEFLIST_UNIQUE(metrics, "metric", &stats_metric_setting_parser_info),
 	DEFLIST_UNIQUE(exporters, "event_exporter", &stats_exporter_setting_parser_info),
 	SETTING_DEFINE_LIST_END
 };
 
 const struct stats_settings stats_default_settings = {
+	.stats_http_rawlog_dir = "",
+
 	.metrics = ARRAY_INIT,
 	.exporters = ARRAY_INIT,
 };

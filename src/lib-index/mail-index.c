@@ -27,8 +27,8 @@
 
 struct mail_index_module_register mail_index_module_register = { 0 };
 
-struct event_category event_category_index = {
-	.name = "index",
+struct event_category event_category_mail_index = {
+	.name = "mail-index",
 };
 
 static void mail_index_close_nonopened(struct mail_index *index);
@@ -48,10 +48,10 @@ static const struct mail_index_optimization_settings default_optimization_set = 
 		.unaccessed_field_drop_secs = 3600 * 24 * 30,
 		.record_max_size = 64 * 1024,
 		.max_size = 1024 * 1024 * 1024,
-		.compress_min_size = 32 * 1024,
-		.compress_delete_percentage = 20,
-		.compress_continued_percentage = 200,
-		.compress_header_continue_count = 4,
+		.purge_min_size = 32 * 1024,
+		.purge_delete_percentage = 20,
+		.purge_continued_percentage = 200,
+		.purge_header_continue_count = 4,
 	},
 };
 
@@ -65,7 +65,7 @@ struct mail_index *mail_index_alloc(struct event *parent_event,
 	index->prefix = i_strdup(prefix);
 	index->fd = -1;
 	index->event = event_create(parent_event);
-	event_add_category(index->event, &event_category_index);
+	event_add_category(index->event, &event_category_mail_index);
 
 	index->extension_pool =
 		pool_alloconly_create(MEMPOOL_GROWING"index extension", 1024);
@@ -214,17 +214,17 @@ void mail_index_set_optimization_settings(struct mail_index *index,
 			set->cache.unaccessed_field_drop_secs;
 	if (set->cache.max_size != 0)
 		dest->cache.max_size = set->cache.max_size;
-	if (set->cache.compress_min_size != 0)
-		dest->cache.compress_min_size = set->cache.compress_min_size;
-	if (set->cache.compress_delete_percentage != 0)
-		dest->cache.compress_delete_percentage =
-			set->cache.compress_delete_percentage;
-	if (set->cache.compress_continued_percentage != 0)
-		dest->cache.compress_continued_percentage =
-			set->cache.compress_continued_percentage;
-	if (set->cache.compress_header_continue_count != 0)
-		dest->cache.compress_header_continue_count =
-			set->cache.compress_header_continue_count;
+	if (set->cache.purge_min_size != 0)
+		dest->cache.purge_min_size = set->cache.purge_min_size;
+	if (set->cache.purge_delete_percentage != 0)
+		dest->cache.purge_delete_percentage =
+			set->cache.purge_delete_percentage;
+	if (set->cache.purge_continued_percentage != 0)
+		dest->cache.purge_continued_percentage =
+			set->cache.purge_continued_percentage;
+	if (set->cache.purge_header_continue_count != 0)
+		dest->cache.purge_header_continue_count =
+			set->cache.purge_header_continue_count;
 	if (set->cache.record_max_size != 0)
 		dest->cache.record_max_size = set->cache.record_max_size;
 }
@@ -1035,6 +1035,25 @@ void mail_index_fchown(struct mail_index *index, int fd, const char *path)
 	mode |= (mode << 3) | (index->mode & 0600);
 	if (fchmod(fd, mode) < 0)
 		mail_index_file_set_syscall_error(index, path, "fchmod()");
+}
+
+int mail_index_lock_sync(struct mail_index *index, const char *lock_reason)
+{
+	uint32_t file_seq;
+	uoff_t file_offset;
+
+	return mail_transaction_log_sync_lock(index->log, lock_reason,
+					      &file_seq, &file_offset);
+}
+
+void mail_index_unlock(struct mail_index *index, const char *long_lock_reason)
+{
+	mail_transaction_log_sync_unlock(index->log, long_lock_reason);
+}
+
+bool mail_index_is_locked(struct mail_index *index)
+{
+	return index->log_sync_locked;
 }
 
 void mail_index_set_syscall_error(struct mail_index *index,

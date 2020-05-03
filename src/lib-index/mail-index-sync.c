@@ -277,7 +277,7 @@ mail_index_need_sync(struct mail_index *index, enum mail_index_sync_flags flags,
 		return TRUE;
 
 	/* already synced */
-	return mail_cache_need_compress(index->cache);
+	return mail_cache_need_purge(index->cache);
 }
 
 static int
@@ -875,7 +875,6 @@ int mail_index_sync_commit(struct mail_index_sync_ctx **_ctx)
 {
         struct mail_index_sync_ctx *ctx = *_ctx;
 	struct mail_index *index = ctx->index;
-	struct mail_cache_compress_lock *cache_lock = NULL;
 	const char *reason = NULL;
 	uint32_t next_uid;
 	bool want_rotate, index_undeleted, delete_index;
@@ -939,32 +938,23 @@ int mail_index_sync_commit(struct mail_index_sync_ctx **_ctx)
 
 	/* The previously called expunged handlers will update cache's
 	   record_count and deleted_record_count. That also has a side effect
-	   of updating whether cache needs to be compressed. */
-	if (ret == 0 && mail_cache_need_compress(index->cache)) {
-		struct mail_index_transaction *cache_trans;
-		enum mail_index_transaction_flags trans_flags;
-
-		trans_flags = MAIL_INDEX_TRANSACTION_FLAG_EXTERNAL;
-		if ((ctx->flags & MAIL_INDEX_SYNC_FLAG_FSYNC) != 0)
-			trans_flags |= MAIL_INDEX_TRANSACTION_FLAG_FSYNC;
-		cache_trans = mail_index_transaction_begin(ctx->view, trans_flags);
-		if (mail_cache_compress(index->cache, cache_trans,
-					&cache_lock) < 0)
-			mail_index_transaction_rollback(&cache_trans);
-		else {
-			/* can't really do anything if index commit fails */
-			(void)mail_index_transaction_commit(&cache_trans);
-			mail_cache_compress_unlock(&cache_lock);
-			/* Make sure the newly committed cache record offsets
-			   are updated to the current index. This is important
-			   if the dovecot.index gets recreated below, because
-			   rotation of dovecot.index.log also re-maps the index
-			   to make sure everything is up-to-date. But if it
-			   wasn't, mail_index_write() will just assert-crash
-			   because log_file_head_offset changed. */
-			if (mail_index_map(ctx->index, MAIL_INDEX_SYNC_HANDLER_FILE) <= 0)
-				ret = -1;
+	   of updating whether cache needs to be purged. */
+	if (ret == 0 && mail_cache_need_purge(index->cache) &&
+	    !mail_cache_transactions_have_changes(index->cache)) {
+		if (mail_cache_purge(index->cache,
+				     index->cache->need_purge_file_seq,
+				     "syncing") < 0) {
+			/* can't really do anything if it fails */
 		}
+		/* Make sure the newly committed cache record offsets are
+		   updated to the current index. This is important if the
+		   dovecot.index gets recreated below, because rotation of
+		   dovecot.index.log also re-maps the index to make sure
+		   everything is up-to-date. But if it wasn't,
+		   mail_index_write() will just assert-crash because
+		   log_file_head_offset changed. */
+		if (mail_index_map(ctx->index, MAIL_INDEX_SYNC_HANDLER_FILE) <= 0)
+			ret = -1;
 	}
 
 	/* Log rotation is allowed only if everything was synced. Note that

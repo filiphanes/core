@@ -89,6 +89,8 @@ static int dict_connection_dict_init(struct dict_connection *conn)
 		return -1;
 	}
 	event_add_str(conn->conn.event, "dict_name", conn->name);
+	if (conn->username[0] != '\0')
+		event_add_str(conn->conn.event, "user", conn->username);
 	uri = strlist[i+1];
 
 	i_zero(&dict_set);
@@ -129,7 +131,6 @@ dict_connection_create(struct master_service_connection *master_conn)
 
 	connection_init_server(dict_connections, &conn->conn, master_conn->name,
 			       master_conn->fd, master_conn->fd);
-	event_set_append_log_prefix(conn->conn.event, "dict client: ");
 	event_add_category(conn->conn.event, &dict_server_event_category);
 
 	o_stream_set_flush_callback(conn->conn.output, dict_connection_output,
