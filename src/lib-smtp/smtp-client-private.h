@@ -152,6 +152,11 @@ struct smtp_client_transaction {
 	bool submitted_data:1;
 };
 
+struct smtp_client_login_callback {
+	smtp_client_command_callback_t *callback;
+	void *context;
+};
+
 struct smtp_client_connection {
 	struct connection conn;
 	pool_t pool;
@@ -194,9 +199,12 @@ struct smtp_client_connection {
 	struct ssl_iostream *ssl_iostream;
 
 	enum smtp_client_connection_state state;
+	pool_t state_pool;
+	struct {
+		struct smtp_reply *login_reply;
+	} state_data;
 
-	smtp_client_command_callback_t *login_callback;
-	void *login_context;
+	ARRAY(struct smtp_client_login_callback) login_callbacks;
 
 	/* commands pending in queue to be sent */
 	struct smtp_client_command *cmd_send_queue_head, *cmd_send_queue_tail;

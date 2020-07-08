@@ -293,20 +293,28 @@ smtp_server_connection_handle_command(struct smtp_server_connection *conn,
 {
 	struct smtp_server_connection *tmp_conn = conn;
 	struct smtp_server_command *cmd;
+	bool finished;
+
+	cmd = smtp_server_command_new(tmp_conn, cmd_name);
+
+	smtp_server_command_ref(cmd);
 
 	smtp_server_connection_ref(tmp_conn);
-	cmd = smtp_server_command_new(tmp_conn, cmd_name, cmd_params);
+	smtp_server_command_execute(cmd, cmd_params);
 	if (!smtp_server_connection_unref(&tmp_conn)) {
 		/* the command start callback managed to get this connection
 		   destroyed */
+		smtp_server_command_unref(&cmd);
 		return FALSE;
 	}
 
-	if (cmd != NULL && conn->command_queue_head == cmd)
+	if (conn->command_queue_head == cmd)
 		(void)smtp_server_command_next_to_reply(&cmd);
 
 	smtp_server_connection_timeout_update(conn);
-	return (cmd == NULL || !cmd->input_locked);
+
+	finished = !cmd->input_locked;
+	return (!smtp_server_command_unref(&cmd) || finished);
 }
 
 static int
@@ -769,9 +777,10 @@ smtp_server_connection_event_create(struct smtp_server *server,
 {
 	struct event *conn_event;
 
-	if (set != NULL && set->event_parent != NULL)
+	if (set != NULL && set->event_parent != NULL) {
 		conn_event = event_create(set->event_parent);
-	else
+		smtp_server_event_init(server, conn_event);
+	} else
 		conn_event = event_create(server->event);
 	event_set_append_log_prefix(
 		conn_event, t_strdup_printf(

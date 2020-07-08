@@ -66,7 +66,7 @@ pem_password_callback(char *buf, int size, int rwflag ATTR_UNUSED,
 		return 0;
 	}
 
-	if (i_strocpy(buf, userdata, size) < 0) {
+	if (i_strocpy(buf, ctx->password, size) < 0) {
 		ctx->error = "SSL private key password is too long";
 		return 0;
 	}
@@ -97,8 +97,12 @@ int openssl_iostream_load_key(const struct ssl_iostream_cert *set,
 	pkey = PEM_read_bio_PrivateKey(bio, NULL, pem_password_callback, &ctx);
 	if (pkey == NULL && ctx.error == NULL) {
 		ctx.error = t_strdup_printf(
-			"Couldn't parse private SSL key (%s setting): %s",
-			set_name, openssl_iostream_error());
+			"Couldn't parse private SSL key (%s setting)%s: %s",
+			set_name,
+			ctx.password != NULL ?
+				" (maybe ssl_key_password is wrong?)" :
+				"",
+			openssl_iostream_error());
 	}
 	BIO_free(bio);
 

@@ -741,7 +741,7 @@ http_server_connection_next_response(struct http_server_connection *conn)
 	int ret;
 
 	if (conn->output_locked)
-		return _OUTPUT_BLOCKED;
+		return _OUTPUT_FINISHED;
 
 	req = conn->request_queue_head;
 	if (req == NULL || req->state == HTTP_SERVER_REQUEST_STATE_NEW) {
@@ -799,7 +799,11 @@ http_server_connection_next_response(struct http_server_connection *conn)
 		return _OUTPUT_ERROR;
 
 	http_server_connection_reset_idle_timeout(conn);
-	return (ret > 0 ? _OUTPUT_AVAILABLE : _OUTPUT_BLOCKED);
+	if (ret == 0)
+		return _OUTPUT_BLOCKED;
+	if (conn->output_locked)
+		return _OUTPUT_FINISHED;
+	return _OUTPUT_AVAILABLE;
 }
 
 static int
@@ -880,9 +884,7 @@ int http_server_connection_output(struct http_server_connection *conn)
 		if (http_server_connection_unref_is_closed(conn) || ret < 0)
 			return -1;
 
-		if (ret > 0) {
-			i_assert(!conn->output_locked);
-
+		if (!conn->output_locked) {
 			/* Room for more responses */
 			ret = http_server_connection_send_responses(conn);
 			if (ret < 0)

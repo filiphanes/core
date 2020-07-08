@@ -95,8 +95,6 @@ static bool client_command_execute(struct pop3_client *client, const char *cmd,
 		return cmd_user(client, args);
 	if (strcmp(cmd, "PASS") == 0)
 		return cmd_pass(client, args);
-	if (strcmp(cmd, "AUTH") == 0)
-		return cmd_auth(client, args);
 	if (strcmp(cmd, "APOP") == 0)
 		return cmd_apop(client, args);
 	if (strcmp(cmd, "STLS") == 0)
@@ -140,20 +138,47 @@ static void pop3_client_input(struct client *client)
 	client_unref(&client);
 }
 
+static bool client_read_cmd_name(struct client *client, const char **cmd_r)
+{
+	const unsigned char *data;
+	size_t size, i;
+	if (i_stream_read_more(client->input, &data, &size) <= 0)
+		return FALSE;
+	for(i = 0; i < size; i++) {
+		if (data[i] == ' ' ||
+		    data[i] == '\r' ||
+		    data[i] == '\n') {
+			*cmd_r = t_str_ucase(t_strndup(data, i));
+			i_stream_skip(client->input, i+1);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 static bool pop3_client_input_next_cmd(struct client *client)
 {
 	struct pop3_client *pop3_client = (struct pop3_client *)client;
-	char *line, *args;
+	const char *cmd, *args;
+	bool parsed;
 
-	if ((line = i_stream_next_line(client->input)) == NULL)
+	if (!pop3_client->authenticating && !client_read_cmd_name(client, &cmd))
 		return FALSE;
 
-	args = strchr(line, ' ');
-	if (args != NULL)
-		*args++ = '\0';
+	if (pop3_client->authenticating ||
+	    strcmp(cmd, "AUTH") == 0) {
+		pop3_client->authenticating = TRUE;
+		int ret = cmd_auth(pop3_client, &parsed);
+		if (ret == 0 || !parsed)
+			return FALSE;
+		pop3_client->authenticating = !parsed;
+		return parsed;
+	}
 
-	if (client_command_execute(pop3_client, line,
-				   args != NULL ? args : ""))
+	if ((args = i_stream_next_line(client->input)) == NULL)
+		return FALSE;
+
+	if (client_command_execute(pop3_client, cmd, args))
 		client->bad_counter = 0;
 	else if (++client->bad_counter >= CLIENT_MAX_BAD_COMMANDS) {
 		client_send_reply(client, POP3_CMD_REPLY_ERROR,
@@ -326,7 +351,7 @@ static struct client_vfuncs pop3_client_vfuncs = {
 	.auth_result = pop3_client_auth_result,
 	.proxy_reset = pop3_proxy_reset,
 	.proxy_parse_line = pop3_proxy_parse_line,
-	.proxy_error = pop3_proxy_error,
+	.proxy_failed = pop3_proxy_failed,
 	.proxy_get_state = pop3_proxy_get_state,
 	.send_raw_data = client_common_send_raw_data,
 	.input_next_cmd  = pop3_client_input_next_cmd,

@@ -1136,6 +1136,28 @@ static bool query_error_want_fallback(CassError error)
 	}
 }
 
+static enum sql_result_error_type
+driver_cassandra_error_is_uncertain(CassError error)
+{
+	switch (error) {
+	case CASS_ERROR_SERVER_WRITE_FAILURE:
+		/* This happens when some of the replicas that were contacted
+		 * by the coordinator replied with an error. */
+	case CASS_ERROR_SERVER_WRITE_TIMEOUT:
+		/* A Cassandra timeout during a write query. */
+	case CASS_ERROR_SERVER_UNAVAILABLE:
+		/* The coordinator knows there are not enough replicas alive
+		 * to perform a query with the requested consistency level. */
+	case CASS_ERROR_LIB_REQUEST_TIMED_OUT:
+		/* A request sent from the driver has timed out. */
+	case CASS_ERROR_LIB_WRITE_ERROR:
+		/* A write error occured. */
+		return SQL_RESULT_ERROR_TYPE_WRITE_UNCERTAIN;
+	default:
+		return SQL_RESULT_ERROR_TYPE_UNKNOWN;
+	}
+}
+
 static void query_callback(CassFuture *future, void *context)
 {
 	struct cassandra_result *result = context;
@@ -1155,12 +1177,7 @@ static void query_callback(CassFuture *future, void *context)
 		/* Timeouts bring uncertainty whether the query succeeded or
 		   not. Also _SERVER_UNAVAILABLE could have actually written
 		   enough copies of the data for the query to succeed. */
-		result->api.error_type = error == CASS_ERROR_SERVER_WRITE_TIMEOUT ||
-			error == CASS_ERROR_SERVER_WRITE_FAILURE ||
-			error == CASS_ERROR_SERVER_UNAVAILABLE ||
-			error == CASS_ERROR_LIB_REQUEST_TIMED_OUT ?
-			SQL_RESULT_ERROR_TYPE_WRITE_UNCERTAIN :
-			SQL_RESULT_ERROR_TYPE_UNKNOWN;
+		result->api.error_type = driver_cassandra_error_is_uncertain(error);
 		result->error = i_strdup_printf("Query '%s' failed: %.*s (in %u.%03u secs%s)",
 			result->query, (int)errsize, errmsg, msecs/1000, msecs%1000,
 			result->page_num == 0 ? "" : t_strdup_printf(", page %u", result->page_num));

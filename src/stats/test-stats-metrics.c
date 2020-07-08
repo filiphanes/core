@@ -19,8 +19,8 @@ bool test_stats_callback(struct event *event,
 
 static const char *settings_blob_1 =
 "metric=test\n"
-"metric/test/name=test\n"
-"metric/test/event_name=test\n"
+"metric/test/metric_name=test\n"
+"metric/test/filter=event=test\n"
 "\n";
 
 static void test_stats_metrics(void)
@@ -46,10 +46,8 @@ static void test_stats_metrics(void)
 
 static const char *settings_blob_2 =
 "metric=test\n"
-"metric/test/name=test\n"
-"metric/test/event_name=test\n"
-"metric/test/filter=\n"
-"metric/test/filter/test_field=value\n"
+"metric/test/metric_name=test\n"
+"metric/test/filter=(event=test AND test_field=value)\n"
 "\n";
 
 static void test_stats_metrics_filter(void)
@@ -63,7 +61,7 @@ static void test_stats_metrics_filter(void)
 		stats_metrics_get_event_filter(stats_metrics);
 	string_t *str_filter = t_str_new(64);
 	event_filter_export(filter, str_filter);
-	test_assert_strcmp("ntest	ftest_field	value	",
+	test_assert_strcmp("((event=\"test\" AND \"test_field\"=\"value\"))",
 			   str_c(str_filter));
 
 	/* send event */
@@ -168,8 +166,8 @@ static void test_stats_metrics_group_by_discrete_real(const struct discrete_test
 				   test->settings_blob));
 
 	test_init(t_strdup_printf("metric=test\n"
-				  "metric/test/name=test\n"
-				  "metric/test/event_name=test\n"
+				  "metric/test/metric_name=test\n"
+				  "metric/test/filter=event=test\n"
 				  "metric/test/group_by=%s\n"
 				  "\n", test->settings_blob));
 
@@ -344,8 +342,8 @@ static void test_stats_metrics_group_by_quantized_real(const struct quantized_te
 				   test->settings_blob));
 
 	test_init(t_strdup_printf("metric=test\n"
-				  "metric/test/name=test\n"
-				  "metric/test/event_name=test\n"
+				  "metric/test/metric_name=test\n"
+				  "metric/test/filter=event=test\n"
 				  "metric/test/group_by=test_name foobar:%s\n"
 				  "\n", test->settings_blob));
 

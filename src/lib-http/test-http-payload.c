@@ -17,6 +17,7 @@
 #endif
 #include "connection.h"
 #include "test-common.h"
+#include "test-subprocess.h"
 #include "http-url.h"
 #include "http-request.h"
 #include "http-server.h"
@@ -24,13 +25,12 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
-#include <signal.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
 
-#define CLIENT_PROGRESS_TIMEOUT     10
+#define CLIENT_PROGRESS_TIMEOUT     30
+#define SERVER_KILL_TIMEOUT_SECS    20
 
 enum payload_handling {
 	PAYLOAD_HANDLING_LOW_LEVEL,
@@ -68,11 +68,12 @@ static struct test_settings {
 static struct ip_addr bind_ip;
 static in_port_t bind_port = 0;
 static int fd_listen = -1;
-static pid_t server_pid = (pid_t)-1;
 static struct ioloop *ioloop_nested = NULL;
 static unsigned ioloop_nested_first = 0;
 static unsigned ioloop_nested_last = 0;
 static unsigned ioloop_nested_depth = 0;
+
+static void main_deinit(void);
 
 /*
  * Test settings
@@ -1581,6 +1582,10 @@ static void test_client_deinit(void)
  * Tests
  */
 
+struct test_server_data {
+	const struct http_server_settings *set;
+};
+
 static void test_open_server_fd(void)
 {
 	i_close_fd(&fd_listen);
@@ -1592,13 +1597,55 @@ static void test_open_server_fd(void)
 	net_set_nonblock(fd_listen, TRUE);
 }
 
-static void test_server_kill(void)
+static int test_run_server(struct test_server_data *data)
 {
-	if (server_pid != (pid_t)-1) {
-		(void)kill(server_pid, SIGKILL);
-		(void)waitpid(server_pid, NULL, 0);
-	}
-	server_pid = (pid_t)-1;
+	const struct http_server_settings *server_set = data->set;
+	struct ioloop *ioloop;
+
+	i_set_failure_prefix("SERVER: ");
+
+	if (debug)
+		i_debug("PID=%s", my_pid);
+
+	ioloop_nested = NULL;
+	ioloop_nested_depth = 0;
+	ioloop = io_loop_create();
+	test_server_init(server_set);
+	io_loop_run(ioloop);
+	test_server_deinit();
+	io_loop_destroy(&ioloop);
+
+	if (debug)
+		i_debug("Terminated");
+
+	i_close_fd(&fd_listen);
+	test_files_deinit();
+	main_deinit();
+	return 0;
+}
+
+static void
+test_run_client(
+	const struct http_client_settings *client_set,
+	void (*client_init)(const struct http_client_settings *client_set))
+{
+	struct ioloop *ioloop;
+
+	i_set_failure_prefix("CLIENT: ");
+
+	if (debug)
+		i_debug("PID=%s", my_pid);
+
+	ioloop_nested = NULL;
+	ioloop_nested_depth = 0;
+	ioloop = io_loop_create();
+	client_init(client_set);
+	io_loop_run(ioloop);
+	test_client_deinit();
+	io_loop_destroy(&ioloop);
+
+	if (debug)
+		i_debug("Terminated");
 }
 
 static void
@@ -1607,43 +1654,26 @@ test_run_client_server(
 	const struct http_server_settings *server_set,
 	void (*client_init)(const struct http_client_settings *client_set))
 {
-	struct ioloop *ioloop;
+	struct test_server_data data;
 
 	failure = NULL;
-	test_open_server_fd();
 
-	if ((server_pid = fork()) == (pid_t)-1)
-		i_fatal("fork() failed: %m");
-	if (server_pid == 0) {
-		server_pid = (pid_t)-1;
-		hostpid_init();
-		if (debug)
-			i_debug("server: PID=%s", my_pid);
-		i_set_failure_prefix("SERVER: ");
-		/* child: server */
-		ioloop_nested = NULL;
-		ioloop_nested_depth = 0;
-		ioloop = io_loop_create();
-		test_server_init(server_set);
-		io_loop_run(ioloop);
-		test_server_deinit();
-		io_loop_destroy(&ioloop);
-		i_close_fd(&fd_listen);
-	} else {
-		if (debug)
-			i_debug("client: PID=%s", my_pid);
-		i_set_failure_prefix("CLIENT: ");
-		i_close_fd(&fd_listen);
-		/* parent: client */
-		ioloop_nested = NULL;
-		ioloop_nested_depth = 0;
-		ioloop = io_loop_create();
-		client_init(client_set);
-		io_loop_run(ioloop);
-		test_client_deinit();
-		io_loop_destroy(&ioloop);
-		test_server_kill();
-	}
+	test_files_init();
+
+	i_zero(&data);
+	data.set = server_set;
+
+	/* Fork server */
+	test_open_server_fd();
+	test_subprocess_fork(test_run_server, &data, FALSE);
+	i_close_fd(&fd_listen);
+
+	/* Run client */
+	test_run_client(client_set, client_init);
+
+	i_unset_failure_prefix();
+	test_subprocess_kill_all(SERVER_KILL_TIMEOUT_SECS);
+	test_files_deinit();
 }
 
 static void
@@ -1703,9 +1733,7 @@ test_run_sequential(
 	http_client_set.max_parallel_connections = 1;
 	http_client_set.max_pipelined_requests = 1;
 
-	test_files_init();
 	test_run_client_server(&http_client_set, &http_server_set, client_init);
-	test_files_deinit();
 
 	test_out_reason("sequential", (failure == NULL), failure);
 }
@@ -1737,9 +1765,7 @@ test_run_pipeline(
 	http_client_set.max_parallel_connections = 1;
 	http_client_set.max_pipelined_requests = 8;
 
-	test_files_init();
 	test_run_client_server(&http_client_set, &http_server_set, client_init);
-	test_files_deinit();
 
 	test_out_reason("pipeline", (failure == NULL), failure);
 }
@@ -1771,9 +1797,7 @@ test_run_parallel(
 	http_client_set.max_parallel_connections = 40;
 	http_client_set.max_pipelined_requests = 8;
 
-	test_files_init();
 	test_run_client_server(&http_client_set, &http_server_set, client_init);
-	test_files_deinit();
 
 	test_out_reason("parallel", (failure == NULL), failure);
 }
@@ -2228,24 +2252,19 @@ static void (*const test_functions[])(void) = {
  * Main
  */
 
-volatile sig_atomic_t terminating = 0;
-
-static void test_signal_handler(int signo)
+static void main_init(void)
 {
-	if (terminating != 0)
-		raise(signo);
-	terminating = 1;
-
-	/* make sure we don't leave any pesky children alive */
-	test_server_kill();
-
-	(void)signal(signo, SIG_DFL);
-	raise(signo);
+#ifdef HAVE_OPENSSL
+	ssl_iostream_openssl_init();
+#endif
 }
 
-static void test_atexit(void)
+static void main_deinit(void)
 {
-	test_server_kill();
+	ssl_iostream_context_cache_free();
+#ifdef HAVE_OPENSSL
+	ssl_iostream_openssl_deinit();
+#endif
 }
 
 int main(int argc, char *argv[])
@@ -2254,18 +2273,7 @@ int main(int argc, char *argv[])
 	int ret;
 
 	lib_init();
-#ifdef HAVE_OPENSSL
-	ssl_iostream_openssl_init();
-#endif
-
-	atexit(test_atexit);
-	(void)signal(SIGCHLD, SIG_IGN);
-	(void)signal(SIGPIPE, SIG_IGN);
-	(void)signal(SIGTERM, test_signal_handler);
-	(void)signal(SIGQUIT, test_signal_handler);
-	(void)signal(SIGINT, test_signal_handler);
-	(void)signal(SIGSEGV, test_signal_handler);
-	(void)signal(SIGABRT, test_signal_handler);
+	main_init();
 
 	while ((c = getopt(argc, argv, "DS")) > 0) {
 		switch (c) {
@@ -2280,6 +2288,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	test_subprocesses_init(debug);
+
 	/* listen on localhost */
 	i_zero(&bind_ip);
 	bind_ip.family = AF_INET;
@@ -2287,10 +2297,8 @@ int main(int argc, char *argv[])
 
 	ret = test_run(test_functions);
 
-	ssl_iostream_context_cache_free();
-#ifdef HAVE_OPENSSL
-	ssl_iostream_openssl_deinit();
-#endif
+	test_subprocesses_deinit();
+	main_deinit();
 	lib_deinit();
 	return ret;
 }

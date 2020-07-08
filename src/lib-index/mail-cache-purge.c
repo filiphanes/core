@@ -26,19 +26,6 @@ struct mail_cache_copy_context {
 	bool new_msg;
 };
 
-static const char *cache_decision_str(enum mail_cache_decision_type dec)
-{
-	switch (dec & ~MAIL_CACHE_DECISION_FORCED) {
-	case MAIL_CACHE_DECISION_NO:
-		return "no";
-	case MAIL_CACHE_DECISION_TEMP:
-		return "temp";
-	case MAIL_CACHE_DECISION_YES:
-		return "yes";
-	}
-	i_unreached();
-}
-
 static void
 mail_cache_merge_bitmask(struct mail_cache_copy_context *ctx,
 			 const struct mail_cache_iterate_field *field)
@@ -176,7 +163,7 @@ mail_cache_purge_check_field(struct mail_cache_copy_context *ctx,
 		 priv->field.last_used < ctx->max_temp_drop_time) {
 		/* YES or TEMP decision field hasn't been accessed for a long
 		   time now. Drop it. */
-		const char *dec_str = cache_decision_str(dec);
+		const char *dec_str = mail_cache_decision_to_string(dec);
 		struct event_passthrough *e =
 			event_create_passthrough(ctx->event)->
 			set_name("mail_cache_purge_drop_field")->
@@ -216,7 +203,7 @@ static int
 mail_cache_copy(struct mail_cache *cache, struct mail_index_transaction *trans,
 		struct event *event, int fd, const char *reason,
 		uint32_t *file_seq_r, uoff_t *file_size_r, uint32_t *max_uid_r,
-		ARRAY_TYPE(uint32_t) *ext_offsets)
+		uint32_t *ext_first_seq_r, ARRAY_TYPE(uint32_t) *ext_offsets)
 {
         struct mail_cache_copy_context ctx;
 	struct mail_cache_lookup_iterate_ctx iter;
@@ -233,12 +220,13 @@ mail_cache_copy(struct mail_cache *cache, struct mail_index_transaction *trans,
 	i_assert(reason != NULL);
 
 	*max_uid_r = 0;
+	*ext_first_seq_r = 0;
 
 	/* get the latest info on fields */
 	if (mail_cache_header_fields_read(cache) < 0)
 		return -1;
 
-	view = mail_index_transaction_get_view(trans);
+	view = mail_index_transaction_open_updated_view(trans);
 	cache_view = mail_cache_view_open(cache, view);
 	output = o_stream_create_fd_file(fd, 0, FALSE);
 
@@ -300,6 +288,7 @@ mail_cache_copy(struct mail_cache *cache, struct mail_index_transaction *trans,
 		seq = trans->first_new_seq;
 	}
 
+	*ext_first_seq_r = seq;
 	i_array_init(ext_offsets, message_count); record_count = 0;
 	for (; seq <= message_count; seq++) {
 		if (mail_index_transaction_is_expunged(trans, seq)) {
@@ -355,6 +344,7 @@ mail_cache_copy(struct mail_cache *cache, struct mail_index_transaction *trans,
 	o_stream_nsend(output, &hdr, sizeof(hdr));
 
 	mail_cache_view_close(&cache_view);
+	mail_index_view_close(&view);
 
 	if (o_stream_finish(output) < 0) {
 		mail_cache_set_syscall_error(cache, "write()");
@@ -385,7 +375,7 @@ mail_cache_purge_write(struct mail_cache *cache,
 {
 	struct event *event;
 	struct stat st;
-	uint32_t prev_file_seq, file_seq, old_offset, max_uid;
+	uint32_t prev_file_seq, file_seq, old_offset, max_uid, ext_first_seq;
 	ARRAY_TYPE(uint32_t) ext_offsets;
 	const uint32_t *offsets;
 	uoff_t prev_file_size, file_size;
@@ -406,7 +396,8 @@ mail_cache_purge_write(struct mail_cache *cache,
 	event_add_int(event, "prev_deleted_records", prev_deleted_records);
 
 	if (mail_cache_copy(cache, trans, event, fd, reason,
-			    &file_seq, &file_size, &max_uid, &ext_offsets) < 0)
+			    &file_seq, &file_size, &max_uid,
+			    &ext_first_seq, &ext_offsets) < 0)
 		return -1;
 
 	if (fstat(fd, &st) < 0) {
@@ -434,7 +425,8 @@ mail_cache_purge_write(struct mail_cache *cache,
 	offsets = array_get(&ext_offsets, &count);
 	for (i = 0; i < count; i++) {
 		if (offsets[i] != 0) {
-			mail_index_update_ext(trans, i + 1, cache->ext_id,
+			mail_index_update_ext(trans, ext_first_seq + i,
+					      cache->ext_id,
 					      &offsets[i], &old_offset);
 		}
 	}

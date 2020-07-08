@@ -11,6 +11,7 @@
 #include "json-tree.h"
 #include "array.h"
 #include "base64.h"
+#include "str-sanitize.h"
 #include "dcrypt.h"
 #include "var-expand.h"
 #include "oauth2.h"
@@ -45,21 +46,23 @@ static int get_time_field(const struct json_tree *tree, const char *key,
 }
 
 static int oauth2_lookup_hmac_key(const struct oauth2_settings *set,
-				  const char *key_id, const buffer_t **hmac_key_r,
+				  const char *azp, const char *alg, const char *key_id,
+				  const buffer_t **hmac_key_r,
 				  const char **error_r)
 {
 	const char *base64_key;
-	if (oauth2_validation_key_cache_lookup_hmac_key(set->key_cache, key_id,
+	const char *cache_key_id = t_strconcat(azp, ".", alg, ".", key_id, NULL);
+	if (oauth2_validation_key_cache_lookup_hmac_key(set->key_cache, cache_key_id,
 							hmac_key_r) == 0)
 		return 0;
 	int ret;
-	const char *lookup_key = t_strconcat(DICT_PATH_SHARED, key_id, NULL);
+	const char *lookup_key = t_strconcat(DICT_PATH_SHARED, azp, "/", alg, "/", key_id, NULL);
 	/* do a synchronous dict lookup */
 	if ((ret = dict_lookup(set->key_dict, pool_datastack_create(),
 			       lookup_key, &base64_key, error_r)) < 0) {
 		return -1;
 	} else if (ret == 0) {
-		*error_r = t_strdup_printf("Key '%s' not found", key_id);
+		*error_r = t_strdup_printf("%s key '%s' not found", alg, key_id);
 		return -1;
 	}
 
@@ -69,29 +72,29 @@ static int oauth2_lookup_hmac_key(const struct oauth2_settings *set,
 		*error_r = "Invalid base64 encoded key";
 		return -1;
 	}
-	oauth2_validation_key_cache_insert_hmac_key(set->key_cache, key_id, key);
+	oauth2_validation_key_cache_insert_hmac_key(set->key_cache, cache_key_id, key);
 	*hmac_key_r = key;
 	return 0;
 }
 
 static int oauth2_validate_hmac(const struct oauth2_settings *set,
-				const char *algo, const char *key_id,
+				const char *azp, const char *alg, const char *key_id,
 				const char *const *blobs, const char **error_r)
 {
 	const struct hash_method *method;
-	if (strcmp(algo, "HS256") == 0)
+	if (strcmp(alg, "HS256") == 0)
 		method = hash_method_lookup("sha256");
-	else if (strcmp(algo, "HS384") == 0)
+	else if (strcmp(alg, "HS384") == 0)
 		method = hash_method_lookup("sha384");
-	else if (strcmp(algo, "HS512") == 0)
+	else if (strcmp(alg, "HS512") == 0)
 		method = hash_method_lookup("sha512");
 	else {
-		*error_r = t_strdup_printf("unsupported algorithm '%s'", algo);
+		*error_r = t_strdup_printf("unsupported algorithm '%s'", alg);
 		return -1;
 	}
 
 	const buffer_t *key;
-	if (oauth2_lookup_hmac_key(set, key_id, &key, error_r) < 0)
+	if (oauth2_lookup_hmac_key(set, azp, alg, key_id, &key, error_r) < 0)
 		return -1;
 	struct hmac_context ctx;
 	hmac_init(&ctx, key->data, key->used, method);
@@ -113,20 +116,22 @@ static int oauth2_validate_hmac(const struct oauth2_settings *set,
 }
 
 static int oauth2_lookup_pubkey(const struct oauth2_settings *set,
-				const char *key_id, struct dcrypt_public_key **key_r,
+				const char *azp, const char *alg, const char *key_id,
+				struct dcrypt_public_key **key_r,
 				const char **error_r)
 {
 	const char *key_str;
-	if (oauth2_validation_key_cache_lookup_pubkey(set->key_cache, key_id, key_r) == 0)
+	const char *cache_key_id = t_strconcat(azp, ".", alg, ".", key_id, NULL);
+	if (oauth2_validation_key_cache_lookup_pubkey(set->key_cache, cache_key_id, key_r) == 0)
 		return 0;
 	int ret;
-	const char *lookup_key = t_strconcat(DICT_PATH_SHARED, key_id, NULL);
+	const char *lookup_key = t_strconcat(DICT_PATH_SHARED, azp, "/", alg, "/", key_id, NULL);
 	/* do a synchronous dict lookup */
 	if ((ret = dict_lookup(set->key_dict, pool_datastack_create(),
 			       lookup_key, &key_str, error_r)) < 0) {
 		return -1;
 	} else if (ret == 0) {
-		*error_r = t_strdup_printf("Key '%s' not found", key_id);
+		*error_r = t_strdup_printf("%s key '%s' not found", alg, key_id);
 		return -1;
 	}
 
@@ -139,13 +144,13 @@ static int oauth2_lookup_pubkey(const struct oauth2_settings *set,
 	}
 
 	/* cache key */
-	oauth2_validation_key_cache_insert_pubkey(set->key_cache, key_id, pubkey);
+	oauth2_validation_key_cache_insert_pubkey(set->key_cache, cache_key_id, pubkey);
 	*key_r = pubkey;
 	return 0;
 }
 
 static int oauth2_validate_rsa_ecdsa(const struct oauth2_settings *set,
-				     const char *algo, const char *key_id,
+				     const char *azp, const char *alg, const char *key_id,
 				     const char *const *blobs, const char **error_r)
 {
 	const char *method;
@@ -156,13 +161,13 @@ static int oauth2_validate_rsa_ecdsa(const struct oauth2_settings *set,
 		return -1;
 	}
 
-	if (str_begins(algo, "RS")) {
+	if (str_begins(alg, "RS")) {
 		padding = DCRYPT_PADDING_RSA_PKCS1;
 		sig_format = DCRYPT_SIGNATURE_FORMAT_DSS;
-	} else if (str_begins(algo, "PS")) {
+	} else if (str_begins(alg, "PS")) {
 		padding = DCRYPT_PADDING_RSA_PKCS1_PSS;
 		sig_format = DCRYPT_SIGNATURE_FORMAT_DSS;
-	} else if (str_begins(algo, "ES")) {
+	} else if (str_begins(alg, "ES")) {
 		padding = DCRYPT_PADDING_DEFAULT;
 		sig_format = DCRYPT_SIGNATURE_FORMAT_X962;
 	} else {
@@ -170,14 +175,14 @@ static int oauth2_validate_rsa_ecdsa(const struct oauth2_settings *set,
 		i_unreached();
 	}
 
-	if (strcmp(algo+2, "256") == 0) {
+	if (strcmp(alg+2, "256") == 0) {
 		method = "sha256";
-	} else if (strcmp(algo+2, "384") == 0) {
+	} else if (strcmp(alg+2, "384") == 0) {
 		method = "sha384";
-	} else if (strcmp(algo+2, "512") == 0) {
+	} else if (strcmp(alg+2, "512") == 0) {
 		method = "sha512";
 	} else {
-		*error_r = t_strdup_printf("Unsupported algorithm '%s'", algo);
+		*error_r = t_strdup_printf("Unsupported algorithm '%s'", alg);
 		return -1;
 	}
 
@@ -185,7 +190,7 @@ static int oauth2_validate_rsa_ecdsa(const struct oauth2_settings *set,
 		t_base64url_decode_str(BASE64_DECODE_FLAG_NO_PADDING, blobs[2]);
 
 	struct dcrypt_public_key *pubkey;
-	if (oauth2_lookup_pubkey(set, key_id, &pubkey, error_r) < 0)
+	if (oauth2_lookup_pubkey(set, azp, alg, key_id, &pubkey, error_r) < 0)
 		return -1;
 
 	/* data to verify */
@@ -204,16 +209,16 @@ static int oauth2_validate_rsa_ecdsa(const struct oauth2_settings *set,
 }
 
 static int oauth2_validate_signature(const struct oauth2_settings *set,
-				     const char *algo, const char *key_id,
+				     const char *azp, const char *alg, const char *key_id,
 				     const char *const *blobs, const char **error_r)
 {
-	if (str_begins(algo, "HS"))
-		return oauth2_validate_hmac(set, algo, key_id, blobs, error_r);
-	else if (str_begins(algo, "RS") || str_begins(algo, "PS") ||
-		 str_begins(algo, "ES"))
-		return oauth2_validate_rsa_ecdsa(set, algo, key_id, blobs, error_r);
+	if (str_begins(alg, "HS"))
+		return oauth2_validate_hmac(set, azp, alg, key_id, blobs, error_r);
+	else if (str_begins(alg, "RS") || str_begins(alg, "PS") ||
+		 str_begins(alg, "ES"))
+		return oauth2_validate_rsa_ecdsa(set, azp, alg, key_id, blobs, error_r);
 
-	*error_r = t_strdup_printf("Unsupported algorithm '%s'", algo);
+	*error_r = t_strdup_printf("Unsupported algorithm '%s'", alg);
 	return -1;
 }
 
@@ -250,7 +255,7 @@ oauth2_jwt_header_process(struct json_tree *tree, const char **alg_r,
 			  const char **kid_r, const char **error_r)
 {
 	const char *typ = get_field(tree, "typ");
-	const char *algo = get_field(tree, "alg");
+	const char *alg = get_field(tree, "alg");
 	const char *kid = get_field(tree, "kid");
 
 	if (null_strcmp(typ, "JWT") != 0) {
@@ -258,20 +263,22 @@ oauth2_jwt_header_process(struct json_tree *tree, const char **alg_r,
 		return -1;
 	}
 
-	if (algo == NULL) {
+	if (alg == NULL) {
 		*error_r = "Cannot find 'alg' field";
 		return -1;
 	}
 
-	/* these are lost when tree is deinit */
-	*alg_r = t_strdup(algo);
+	/* These are lost when tree is deinitialized.
+	   Make sure algorithm is uppercased. */
+	*alg_r = t_str_ucase(alg);
 	*kid_r = t_strdup(kid);
 	return 0;
 }
 
 static int
-oauth2_jwt_body_process(ARRAY_TYPE(oauth2_field) *fields, struct json_tree *tree,
-			const char **error_r)
+oauth2_jwt_body_process(const struct oauth2_settings *set, const char *alg, const char *kid,
+			ARRAY_TYPE(oauth2_field) *fields, struct json_tree *tree,
+			const char *const *blobs, const char **error_r)
 {
 	const char *sub = get_field(tree, "sub");
 
@@ -295,13 +302,13 @@ oauth2_jwt_body_process(ARRAY_TYPE(oauth2_field) *fields, struct json_tree *tree
 	if ((ret = get_time_field(tree, "nbf", &nbf)) < 0) {
 		*error_r = "Malformed 'nbf' field";
 		return -1;
-	} else if (ret == 0)
+	} else if (ret == 0 || nbf == 0)
 		nbf = t0;
 
 	if ((ret = get_time_field(tree, "iat", &iat)) < 0) {
 		*error_r = "Malformed 'iat' field";
 		return -1;
-	} else if (ret == 0)
+	} else if (ret == 0 || iat == 0)
 		iat = t0;
 
 	if (nbf > t0) {
@@ -324,6 +331,27 @@ oauth2_jwt_body_process(ARRAY_TYPE(oauth2_field) *fields, struct json_tree *tree
 		*error_r = "Token time values are conflicting";
 		return -1;
 	}
+
+	const char *iss = get_field(tree, "iss");
+	if (set->issuers != NULL && *set->issuers != NULL) {
+		if (iss == NULL) {
+			*error_r = "Token is missing 'iss' field";
+			return -1;
+		}
+		if (!str_array_find(set->issuers, iss)) {
+			*error_r = t_strdup_printf("Issuer '%s' is not allowed",
+						   str_sanitize_utf8(iss, 128));
+			return -1;
+		}
+	}
+
+	/* see if there is azp */
+	const char *azp = get_field(tree, "azp");
+	if (azp == NULL)
+		azp = "default";
+
+	if (oauth2_validate_signature(set, azp, alg, kid, blobs, error_r) < 0)
+		return -1;
 
 	oauth2_jwt_copy_fields(fields, tree);
 	return 0;
@@ -359,8 +387,8 @@ int oauth2_try_parse_jwt(const struct oauth2_settings *set,
 	if (oauth2_json_tree_build(header, &header_tree, error_r) < 0)
 		return -1;
 
-	const char *algo, *kid;
-	ret = oauth2_jwt_header_process(header_tree, &algo, &kid, error_r);
+	const char *alg, *kid;
+	ret = oauth2_jwt_header_process(header_tree, &alg, &kid, error_r);
 	json_tree_deinit(&header_tree);
 	if (ret < 0)
 		return -1;
@@ -375,17 +403,38 @@ int oauth2_try_parse_jwt(const struct oauth2_settings *set,
 		return -1;
 	}
 
-	/* from now on, this is considered a JWT token. try to validate signature. */
-	if (oauth2_validate_signature(set, algo, kid, blobs, error_r) < 0)
-		return -1;
+	size_t pos = strcspn(kid, "./%");
+	if (pos < strlen(kid)) {
+		/* sanitize kid, cannot allow dots or / in it, so we encode them */
+		string_t *new_kid = t_str_new(strlen(kid));
+		/* put initial data */
+		str_append_data(new_kid, kid, pos);
+		for (const char *c = kid+pos; *c != '\0'; c++) {
+			switch (*c) {
+			case '.':
+				str_append(new_kid, "%2e");
+				break;
+			case '/':
+				str_append(new_kid, "%2f");
+				break;
+			case '%':
+				str_append(new_kid, "%25");
+				break;
+			default:
+				str_append_c(new_kid, *c);
+				break;
+			}
+		}
+		kid = str_c(new_kid);
+	}
 
-	/* then parse the actual body */
+	/* parse body */
 	struct json_tree *body_tree;
 	buffer_t *body =
 		t_base64url_decode_str(BASE64_DECODE_FLAG_NO_PADDING, blobs[1]);
 	if (oauth2_json_tree_build(body, &body_tree, error_r) == -1)
 		return -1;
-	ret = oauth2_jwt_body_process(fields, body_tree, error_r);
+	ret = oauth2_jwt_body_process(set, alg, kid, fields, body_tree, blobs, error_r);
 	json_tree_deinit(&body_tree);
 
 	return ret;

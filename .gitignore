@@ -35,6 +35,7 @@ compile_commands.json
 /stamp.h
 /stamp-h1
 /stamp-h2
+/ylwrap
 /autom4te.cache
 /ChangeLog
 /cc-wrapper.sh
@@ -125,6 +126,9 @@ src/imap/imap
 src/indexer/indexer
 src/indexer/indexer-worker
 src/ipc/ipc
+src/lib/event-filter-lexer.c
+src/lib/event-filter-parser.c
+src/lib/event-filter-parser.h
 src/lib/unicodemap.c
 src/lib/UnicodeData.txt
 src/lib-compression/bench-compression

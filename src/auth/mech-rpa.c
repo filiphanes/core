@@ -535,9 +535,6 @@ mech_rpa_auth_continue(struct auth_request *auth_request,
 	struct rpa_auth_request *request =
 		(struct rpa_auth_request *)auth_request;
 
-	if (auth_request_fail_on_nuls(auth_request, data, data_size))
-		return;
-
 	switch (request->phase) {
 	case 0:
 		mech_rpa_auth_phase1(auth_request, data, data_size);
@@ -583,7 +580,7 @@ const struct mech_module mech_rpa = {
 	"RPA",
 
 	.flags = MECH_SEC_DICTIONARY | MECH_SEC_ACTIVE |
-		MECH_SEC_MUTUAL_AUTH,
+		MECH_SEC_MUTUAL_AUTH | MECH_SEC_ALLOW_NULS,
 	.passdb_need = MECH_PASSDB_NEED_LOOKUP_CREDENTIALS,
 
 	mech_rpa_auth_new,
