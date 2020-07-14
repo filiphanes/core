@@ -18,8 +18,11 @@
 #include "pop3-proxy.h"
 #include "pop3-login-settings.h"
 
+#include <ctype.h>
+
 /* Disconnect client when it sends too many bad commands */
 #define CLIENT_MAX_BAD_COMMANDS 3
+#define CLIENT_MAX_CMD_LEN 8
 
 static bool cmd_stls(struct pop3_client *client)
 {
@@ -88,7 +91,6 @@ static bool cmd_xclient(struct pop3_client *client, const char *args)
 static bool client_command_execute(struct pop3_client *client, const char *cmd,
 				   const char *args)
 {
-	cmd = t_str_ucase(cmd);
 	if (strcmp(cmd, "CAPA") == 0)
 		return cmd_capa(client, args);
 	if (strcmp(cmd, "USER") == 0)
@@ -115,7 +117,16 @@ static bool client_command_execute(struct pop3_client *client, const char *cmd,
 
 static void pop3_client_input(struct client *client)
 {
-	i_assert(!client->authenticating);
+	if (client->authenticating) {
+		struct pop3_client *pop3_client =
+			container_of(client, struct pop3_client, common);
+		bool parsed;
+		cmd_auth(pop3_client, &parsed);
+		if (!parsed)
+			client->authenticating = FALSE;
+		else
+			return;
+	}
 
 	if (!client_read(client))
 		return;
@@ -142,16 +153,21 @@ static bool client_read_cmd_name(struct client *client, const char **cmd_r)
 {
 	const unsigned char *data;
 	size_t size, i;
+	string_t *cmd = t_str_new(CLIENT_MAX_CMD_LEN);
 	if (i_stream_read_more(client->input, &data, &size) <= 0)
 		return FALSE;
 	for(i = 0; i < size; i++) {
+		if (data[i] == '\r') continue;
 		if (data[i] == ' ' ||
-		    data[i] == '\r' ||
-		    data[i] == '\n') {
-			*cmd_r = t_str_ucase(t_strndup(data, i));
-			i_stream_skip(client->input, i+1);
+		    data[i] == '\n' ||
+		    data[i] == '\0' ||
+		    i >= CLIENT_MAX_CMD_LEN) {
+			*cmd_r = str_c(cmd);
+			/* only skip ws */
+			i_stream_skip(client->input, i + (data[i] == ' ' ? 1 : 0));
 			return TRUE;
 		}
+		str_append_c(cmd, i_toupper(data[i]));
 	}
 	return FALSE;
 }
@@ -162,16 +178,13 @@ static bool pop3_client_input_next_cmd(struct client *client)
 	const char *cmd, *args;
 	bool parsed;
 
-	if (!pop3_client->authenticating && !client_read_cmd_name(client, &cmd))
+	if (!client_read_cmd_name(client, &cmd))
 		return FALSE;
 
-	if (pop3_client->authenticating ||
-	    strcmp(cmd, "AUTH") == 0) {
-		pop3_client->authenticating = TRUE;
+	if (strcmp(cmd, "AUTH") == 0) {
 		int ret = cmd_auth(pop3_client, &parsed);
 		if (ret == 0 || !parsed)
 			return FALSE;
-		pop3_client->authenticating = !parsed;
 		return parsed;
 	}
 
