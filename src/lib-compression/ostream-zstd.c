@@ -10,6 +10,7 @@
 
 #include "zstd.h"
 #include "zstd_errors.h"
+#include "iostream-zstd-private.h"
 
 struct zstd_ostream {
 	struct ostream_private ostream;
@@ -25,23 +26,29 @@ struct zstd_ostream {
 	bool finished:1;
 };
 
-static void o_stream_zstd_error(struct zstd_ostream *zstream, const char *error)
+static void o_stream_zstd_write_error(struct zstd_ostream *zstream, size_t err)
 {
+	ZSTD_ErrorCode errcode = zstd_version_errcode(ZSTD_getErrorCode(err));
+	const char *error = ZSTD_getErrorName(err);
+	if (errcode == ZSTD_error_memory_allocation)
+		i_fatal_status(FATAL_OUTOFMEM, "zstd.write(%s): Out of memory",
+			       o_stream_get_name(&zstream->ostream.ostream));
+	else if (errcode == ZSTD_error_prefix_unknown ||
+#if HAVE_DECL_ZSTD_ERROR_PARAMETER_UNSUPPORTED == 1
+		 errcode == ZSTD_error_parameter_unsupported ||
+#endif
+		 errcode == ZSTD_error_dictionary_wrong ||
+		 errcode == ZSTD_error_init_missing)
+		zstream->ostream.ostream.stream_errno = EINVAL;
+	else
+		zstream->ostream.ostream.stream_errno = EIO;
+
 	io_stream_set_error(&zstream->ostream.iostream,
 			    "zstd.write(%s): %s at %"PRIuUOFF_T,
 			    o_stream_get_name(&zstream->ostream.ostream), error,
 			    zstream->ostream.ostream.offset);
 	if (zstream->log_errors)
 		i_error("%s", zstream->ostream.iostream.error);
-}
-
-static void o_stream_zstd_write_error(struct zstd_ostream *zstream, size_t err)
-{
-	const char *error = ZSTD_getErrorName(err);
-	if (err == ZSTD_error_memory_allocation)
-		i_fatal_status(FATAL_OUTOFMEM, "zstd.write(%s): Out of memory",
-			       o_stream_get_name(&zstream->ostream.ostream));
-	o_stream_zstd_error(zstream, error);
 }
 
 static ssize_t o_stream_zstd_send_outbuf(struct zstd_ostream *zstream)
@@ -173,6 +180,8 @@ o_stream_create_zstd(struct ostream *output, int level)
 	size_t ret;
 
 	i_assert(level >= 1 && level <= ZSTD_maxCLevel());
+
+	zstd_version_check();
 
 	zstream = i_new(struct zstd_ostream, 1);
 	zstream->ostream.sendv = o_stream_zstd_sendv;

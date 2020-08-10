@@ -51,6 +51,7 @@ fs_alloc(const struct fs *fs_class, const char *args,
 	fs->set.enable_timing = set->enable_timing;
 	i_array_init(&fs->module_contexts, 5);
 	fs->event = fs_create_event(fs, set->event);
+	event_set_forced_debug(fs->event, fs->set.debug);
 
 	T_BEGIN {
 		if ((ret = fs_class->v.init(fs, args, set, &temp_error)) < 0)
@@ -226,6 +227,10 @@ void fs_unref(struct fs **_fs)
 	}
 	i_assert(fs->files == NULL);
 
+	if (fs->v.deinit != NULL)
+		fs->v.deinit(fs);
+
+	fs_deinit(&fs->parent);
 	event_unref(&fs->event);
 	i_free(fs->username);
 	i_free(fs->session_id);
@@ -235,7 +240,7 @@ void fs_unref(struct fs **_fs)
 			stats_dist_deinit(&fs->stats.timings[i]);
 	}
 	T_BEGIN {
-		fs->v.deinit(fs);
+		fs->v.free(fs);
 	} T_END;
 	array_free_i(&module_contexts_arr);
 }
