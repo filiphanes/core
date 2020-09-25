@@ -97,6 +97,7 @@ libauth_la_SOURCES = \
 	mech-plain-common.c \
 	auth-penalty.c \
 	auth-request.c \
+	auth-request-fields.c \
 	auth-request-handler.c \
 	auth-request-stats.c \
 	auth-request-var-expand.c \
@@ -283,6 +284,7 @@ test_auth_cache_CPPFLAGS = $(AM_CPPFLAGS)
 
 test_auth_SOURCES = \
 	test-auth-request-var-expand.c \
+	test-auth-request-fields.c \
 	test-username-filter.c \
 	test-db-dict.c \
 	test-lua.c \

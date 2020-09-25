@@ -246,13 +246,10 @@ bool password_generate_encoded(const char *plaintext, const struct password_gene
 
 const char *password_generate_salt(size_t len)
 {
-	unsigned int i;
 	char *salt;
-
 	salt = t_malloc_no0(len + 1);
-	random_fill(salt, len);
-	for (i = 0; i < len; i++)
-		salt[i] = salt_chars[salt[i] % (sizeof(salt_chars)-1)];
+	for (size_t i = 0; i < len; i++)
+		salt[i] = salt_chars[i_rand_limit(sizeof(salt_chars) - 1)];
 	salt[len] = '\0';
 	return salt;
 }
@@ -373,13 +370,9 @@ md5_crypt_generate(const char *plaintext, const struct password_generate_params 
 		   const unsigned char **raw_password_r, size_t *size_r)
 {
 	const char *password;
-	char salt[9];
-	unsigned int i;
+	const char *salt;
 
-	random_fill(salt, sizeof(salt)-1);
-	for (i = 0; i < sizeof(salt)-1; i++)
-		salt[i] = salt_chars[salt[i] % (sizeof(salt_chars)-1)];
-	salt[sizeof(salt)-1] = '\0';
+	salt = password_generate_salt(8);
 
 	password = password_generate_md5_crypt(plaintext, salt);
 	*raw_password_r = (const unsigned char *)password;

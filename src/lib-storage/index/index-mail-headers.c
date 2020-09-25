@@ -16,11 +16,11 @@
 #include "index-storage.h"
 #include "index-mail.h"
 
-static const enum message_header_parser_flags hdr_parser_flags =
-	MESSAGE_HEADER_PARSER_FLAG_SKIP_INITIAL_LWSP |
-	MESSAGE_HEADER_PARSER_FLAG_DROP_CR;
-static const enum message_parser_flags msg_parser_flags =
-	MESSAGE_PARSER_FLAG_SKIP_BODY_BLOCK;
+static const struct message_parser_settings msg_parser_set = {
+	.hdr_flags = MESSAGE_HEADER_PARSER_FLAG_SKIP_INITIAL_LWSP |
+		MESSAGE_HEADER_PARSER_FLAG_DROP_CR,
+	.flags = MESSAGE_PARSER_FLAG_SKIP_BODY_BLOCK,
+};
 
 static int header_line_cmp(const struct index_mail_line *l1,
 			   const struct index_mail_line *l2)
@@ -209,10 +209,11 @@ void index_mail_parse_header_init(struct index_mail *mail,
 		array_clear(&mail->header_lines);
 		array_clear(&mail->header_match_lines);
 
-		mail->header_match_value += HEADER_MATCH_SKIP_COUNT;
 		i_assert((mail->header_match_value &
 			  (HEADER_MATCH_SKIP_COUNT-1)) == 0);
-		if (mail->header_match_value == 0) {
+		if (mail->header_match_value + HEADER_MATCH_SKIP_COUNT <= UINT8_MAX)
+			mail->header_match_value += HEADER_MATCH_SKIP_COUNT;
+		else {
 			/* wrapped, we'll have to clear the buffer */
 			array_clear(&mail->header_match);
 			mail->header_match_value = HEADER_MATCH_SKIP_COUNT;
@@ -399,7 +400,7 @@ index_mail_cache_parse_init(struct mail *_mail, struct istream *input)
 	mail->data.parser_input = input;
 	mail->data.parser_ctx =
 		message_parser_init(mail->mail.data_pool, input,
-				    hdr_parser_flags, msg_parser_flags);
+				    &msg_parser_set);
 	i_stream_unref(&input);
 	return input2;
 }
@@ -428,14 +429,12 @@ static void index_mail_init_parser(struct index_mail *mail)
 		data->parser_input = data->stream;
 		data->parser_ctx = message_parser_init(mail->mail.data_pool,
 						       data->stream,
-						       hdr_parser_flags,
-						       msg_parser_flags);
+						       &msg_parser_set);
 	} else {
 		data->parser_ctx =
 			message_parser_init_from_parts(data->parts,
 						       data->stream,
-						       hdr_parser_flags,
-						       msg_parser_flags);
+						       &msg_parser_set);
 	}
 }
 
@@ -468,7 +467,7 @@ int index_mail_parse_headers(struct index_mail *mail,
 		i_assert(!data->save_bodystructure_body ||
 			 data->parser_ctx != NULL);
 		message_parse_header(data->stream, &data->hdr_size,
-				     hdr_parser_flags,
+				     msg_parser_set.hdr_flags,
 				     index_mail_parse_header_cb, mail);
 	}
 	if (index_mail_stream_check_failure(mail) < 0)
@@ -526,7 +525,7 @@ int index_mail_headers_get_envelope(struct index_mail *mail)
 	if (mail->data.envelope == NULL) {
 		/* we got the headers from cache - parse them to get the
 		   envelope */
-		message_parse_header(stream, NULL, hdr_parser_flags,
+		message_parse_header(stream, NULL, msg_parser_set.hdr_flags,
 				     imap_envelope_parse_callback, mail);
 		if (stream->stream_errno != 0) {
 			index_mail_stream_log_failure_for(mail, stream);
