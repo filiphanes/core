@@ -69,7 +69,7 @@ mail_cache_purge_field(struct mail_cache_copy_context *ctx,
 	}
 	*field_seen = ctx->field_seen_value;
 
-	dec = cache_field->decision & ~MAIL_CACHE_DECISION_FORCED;
+	dec = cache_field->decision & ENUM_NEGATE(MAIL_CACHE_DECISION_FORCED);
 	if (ctx->new_msg) {
 		if (dec == MAIL_CACHE_DECISION_NO)
 			return;
@@ -191,7 +191,7 @@ mail_cache_purge_check_field(struct mail_cache_copy_context *ctx,
 	priv->field.decision = dec;
 
 	/* drop all fields we don't want */
-	if ((dec & ~MAIL_CACHE_DECISION_FORCED) == MAIL_CACHE_DECISION_NO) {
+	if ((dec & ENUM_NEGATE(MAIL_CACHE_DECISION_FORCED)) == MAIL_CACHE_DECISION_NO) {
 		priv->used = FALSE;
 		priv->field.last_used = 0;
 	}
@@ -293,7 +293,8 @@ mail_cache_copy(struct mail_cache *cache, struct mail_index_transaction *trans,
 		ctx.new_msg = seq >= first_new_seq;
 		buffer_set_used_size(ctx.buffer, 0);
 
-		if (++ctx.field_seen_value == 0) {
+		ctx.field_seen_value = (ctx.field_seen_value + 1) % UINT8_MAX;
+		if (ctx.field_seen_value == 0) {
 			memset(buffer_get_modifiable_data(ctx.field_seen, NULL),
 			       0, buffer_get_size(ctx.field_seen));
 			ctx.field_seen_value++;

@@ -57,6 +57,27 @@ smtp_server_connection_get_stats(struct smtp_server_connection *conn)
 	return &conn->stats;
 }
 
+static bool
+smtp_server_connection_check_pipeline(struct smtp_server_connection *conn)
+{
+	unsigned int pipeline = conn->command_queue_count;
+
+	if (conn->command_queue_tail != NULL) {
+		i_assert(pipeline > 0);
+		if (conn->command_queue_tail->state ==
+		    SMTP_SERVER_COMMAND_STATE_SUBMITTED_REPLY)
+			pipeline--;
+	}
+
+	if (pipeline >= conn->set.max_pipelined_commands) {
+		e_debug(conn->event, "Command pipeline is full "
+			"(pipelined commands %u > limit %u)",
+			pipeline, conn->set.max_pipelined_commands);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 void smtp_server_connection_input_halt(struct smtp_server_connection *conn)
 {
 	connection_input_halt(&conn->conn);
@@ -72,8 +93,7 @@ void smtp_server_connection_input_resume(struct smtp_server_connection *conn)
 		if (conn->input_locked || conn->input_broken ||
 			conn->disconnected)
 			return;
-		if (conn->command_queue_count >
-			conn->server->set.max_pipelined_commands)
+		if (!smtp_server_connection_check_pipeline(conn))
 			return;
 
 		/* Is queued command still blocking input? */
@@ -176,7 +196,7 @@ void smtp_server_connection_set_ssl_streams(struct smtp_server_connection *conn,
 					    struct ostream *output)
 {
 	conn->ssl_secured = TRUE;
-	conn->set.capabilities &= ~SMTP_CAPABILITY_STARTTLS;
+	conn->set.capabilities &= ENUM_NEGATE(SMTP_CAPABILITY_STARTTLS);
 
 	smtp_server_connection_set_streams(conn, input, output);
 }
@@ -390,7 +410,7 @@ int smtp_server_connection_ssl_init(struct smtp_server_connection *conn)
 	}
 
 	conn->ssl_secured = TRUE;
-	conn->set.capabilities &= ~SMTP_CAPABILITY_STARTTLS;
+	conn->set.capabilities &= ENUM_NEGATE(SMTP_CAPABILITY_STARTTLS);
 
 	if (conn->ssl_start)
 		smtp_server_connection_ready(conn);
@@ -449,8 +469,7 @@ smtp_server_connection_handle_input(struct smtp_server_connection *conn)
 			if (conn->closing)
 				break;
 
-			if (conn->command_queue_count >=
-				conn->server->set.max_pipelined_commands) {
+			if (!smtp_server_connection_check_pipeline(conn)) {
 				smtp_server_connection_input_halt(conn);
 				return;
 			}
@@ -577,8 +596,7 @@ static void smtp_server_connection_input(struct connection *_conn)
 	i_assert(!conn->halted);
 
 
-	if (conn->command_queue_count >
-	    conn->server->set.max_pipelined_commands) {
+	if (!smtp_server_connection_check_pipeline(conn)) {
 		smtp_server_connection_input_halt(conn);
 		return;
 	}
@@ -730,10 +748,11 @@ static int smtp_server_connection_output(struct smtp_server_connection *conn)
 		smtp_server_connection_timeout_reset(conn);
 		smtp_server_connection_send_replies(conn);
 	}
-	if (ret >= 0 && !conn->corked && conn->conn.output != NULL) {
+	if (ret >= 0 && !conn->corked && conn->conn.output != NULL)
 		ret = o_stream_uncork_flush(conn->conn.output);
-		if (ret < 0)
-			smtp_server_connection_handle_output_error(conn);
+	if (conn->conn.output != NULL && conn->conn.output->closed) {
+		smtp_server_connection_handle_output_error(conn);
+		ret = -1;
 	}
 	smtp_server_connection_unref(&conn);
 	return ret;
@@ -752,8 +771,8 @@ void smtp_server_connection_trigger_output(struct smtp_server_connection *conn)
  */
 
 static struct connection_settings smtp_server_connection_set = {
-	.input_max_size = (size_t)-1,
-	.output_max_size = (size_t)-1,
+	.input_max_size = SIZE_MAX,
+	.output_max_size = SIZE_MAX,
 	.client = FALSE,
 	.log_connection_id = TRUE,
 };
@@ -844,7 +863,7 @@ smtp_server_connection_alloc(struct smtp_server *server,
 
 		conn->set.max_message_size = set->max_message_size;
 		if (set->max_message_size == 0 ||
-		    set->max_message_size == (uoff_t)-1) {
+		    set->max_message_size == UOFF_T_MAX) {
 			conn->set.command_limits.max_data_size = UOFF_T_MAX;
 		} else if (conn->set.command_limits.max_data_size != 0) {
 			/* Explicit limit given */
@@ -963,7 +982,7 @@ smtp_server_connection_create(
 
 	conn->ssl_start = ssl_start;
 	if (ssl_start)
-		conn->set.capabilities &= ~SMTP_CAPABILITY_STARTTLS;
+		conn->set.capabilities &= ENUM_NEGATE(SMTP_CAPABILITY_STARTTLS);
 
 	/* Halt input until started */
 	smtp_server_connection_halt(conn);
@@ -1203,7 +1222,7 @@ void smtp_server_connection_login(struct smtp_server_connection *conn,
 	i_assert(conn->username == NULL);
 	i_assert(conn->helo_domain == NULL);
 
-	conn->set.capabilities &= ~SMTP_CAPABILITY_STARTTLS;
+	conn->set.capabilities &= ENUM_NEGATE(SMTP_CAPABILITY_STARTTLS);
 	conn->username = i_strdup(username);
 	if (helo != NULL && *helo != '\0') {
 		conn->helo_domain = i_strdup(helo);

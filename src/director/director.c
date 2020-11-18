@@ -797,7 +797,7 @@ director_flush_user_continue(int result, struct director_kill_context *ctx)
 						  ctx->username_hash);
 
 	if (result == 0) {
-		struct istream *is = iostream_temp_finish(&ctx->reply, (size_t)-1);
+		struct istream *is = iostream_temp_finish(&ctx->reply, SIZE_MAX);
 		char *data;
 		i_stream_set_return_partial_line(is, TRUE);
 		data = i_stream_read_next_line(is);
@@ -1564,7 +1564,7 @@ director_get_username_hash(struct director *dir, const char *username,
 	if (mail_user_hash(username, dir->set->director_username_hash, hash_r,
 			   &error))
 		return TRUE;
-	e_error(dir->event, "Failed to expand director_user_expire=%s: %s",
+	e_error(dir->event, "Failed to expand director_username_hash=%s: %s",
 		dir->set->director_username_hash, error);
 	return FALSE;
 }

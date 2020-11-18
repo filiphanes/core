@@ -204,7 +204,8 @@ static void test_array_cmp(void)
 		unsigned int j = i_rand_limit(NELEMS);
 		const unsigned short *ptmp = array_idx(&arr2, j);
 		unsigned short tmp = *ptmp;
-		unsigned short repl = tmp + deltas[i_rand_limit(N_ELEMENTS(deltas))];
+		unsigned short repl = ((unsigned int)tmp +
+			deltas[i_rand_limit(N_ELEMENTS(deltas))]) & 0xffff;
 
 		array_idx_set(&arr2, j, &repl);
 		test_assert_idx(array_cmp(&arr1, &arr2) == (tmp == repl), i);
@@ -263,7 +264,7 @@ static void test_array_cmp_str(void)
 		char buf[12];
 		const char *bufp = buf;
 		memcpy(buf, ostr, olen+1);
-		buf[rc] = i_rand_limit(CHAR_MAX + 1 - CHAR_MIN) + CHAR_MIN;
+		buf[rc] = (int32_t)i_rand_limit(CHAR_MAX + 1 - CHAR_MIN) + CHAR_MIN;
 		if(rc == olen)
 			buf[rc+1] = '\0';
 		array_idx_set(&arr2, j, &bufp);

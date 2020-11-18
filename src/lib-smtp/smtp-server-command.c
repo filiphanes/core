@@ -523,6 +523,9 @@ smtp_server_command_handle_reply(struct smtp_server_command *cmd)
 	if (!smtp_server_command_replied(&cmd))
 		return smtp_server_connection_unref(&conn);
 
+	if (cmd->input_locked)
+		smtp_server_command_input_unlock(&cmd->context);
+
 	/* Submit reply */
 	switch (cmd->state) {
 	case SMTP_SERVER_COMMAND_STATE_NEW:
@@ -709,9 +712,7 @@ void smtp_server_command_finished(struct smtp_server_command *cmd)
 		smtp_server_command_unref(&cmd);
 		return;
 	} else if (cmd->input_locked) {
-		if (cmd->input_captured)
-			smtp_server_connection_input_halt(conn);
-		smtp_server_connection_input_resume(conn);
+		smtp_server_command_input_unlock(&cmd->context);
 	}
 
 	smtp_server_command_unref(&cmd);
@@ -767,6 +768,10 @@ void smtp_server_command_input_unlock(struct smtp_server_cmd_ctx *cmd)
 	struct smtp_server_connection *conn = cmd->conn;
 
 	command->input_locked = FALSE;
+	if (command->input_captured) {
+		command->input_captured = FALSE;
+		smtp_server_connection_input_halt(conn);
+	}
 	smtp_server_connection_input_resume(conn);
 }
 

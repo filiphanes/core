@@ -438,24 +438,17 @@ static void index_mail_init_parser(struct index_mail *mail)
 	}
 }
 
-int index_mail_parse_headers(struct index_mail *mail,
-			     struct mailbox_header_lookup_ctx *headers,
-			     const char *reason)
+int index_mail_parse_headers_internal(struct index_mail *mail,
+				      struct mailbox_header_lookup_ctx *headers)
 {
 	struct index_mail_data *data = &mail->data;
-	struct istream *input;
-	uoff_t old_offset;
-
-	old_offset = data->stream == NULL ? 0 : data->stream->v_offset;
-
-	if (mail_get_hdr_stream_because(&mail->mail.mail, NULL, reason, &input) < 0)
-		return -1;
 
 	i_assert(data->stream != NULL);
 
 	index_mail_parse_header_init(mail, headers);
 
-	if (data->parts == NULL || data->save_bodystructure_header) {
+	if (data->parts == NULL || data->save_bodystructure_header ||
+	    (data->access_part & PARSE_BODY) != 0) {
 		/* initialize bodystructure parsing in case we read the whole
 		   message. */
 		index_mail_init_parser(mail);
@@ -473,10 +466,26 @@ int index_mail_parse_headers(struct index_mail *mail,
 	if (index_mail_stream_check_failure(mail) < 0)
 		return -1;
 	data->hdr_size_set = TRUE;
-	data->access_part &= ~PARSE_HDR;
-
-	i_stream_seek(data->stream, old_offset);
+	data->access_part &= ENUM_NEGATE(PARSE_HDR);
 	return 0;
+}
+
+int index_mail_parse_headers(struct index_mail *mail,
+			     struct mailbox_header_lookup_ctx *headers,
+			     const char *reason)
+{
+	struct index_mail_data *data = &mail->data;
+	struct istream *input;
+	uoff_t old_offset;
+
+	old_offset = data->stream == NULL ? 0 : data->stream->v_offset;
+
+	if (mail_get_hdr_stream_because(&mail->mail.mail, NULL, reason, &input) < 0)
+		return -1;
+
+	int ret = index_mail_parse_headers_internal(mail, headers);
+	i_stream_seek(data->stream, old_offset);
+	return ret;
 }
 
 static void

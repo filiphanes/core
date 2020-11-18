@@ -489,7 +489,7 @@ static void
 mail_cache_transaction_drop_last_flush(struct mail_cache_transaction_ctx *ctx)
 {
 	buffer_copy(ctx->cache_data, 0,
-		    ctx->cache_data, ctx->last_rec_pos, (size_t)-1);
+		    ctx->cache_data, ctx->last_rec_pos, SIZE_MAX);
 	buffer_set_used_size(ctx->cache_data,
 			     ctx->cache_data->used - ctx->last_rec_pos);
 	ctx->last_rec_pos = 0;
@@ -802,7 +802,7 @@ void mail_cache_add(struct mail_cache_transaction_ctx *ctx, uint32_t seq,
 	i_assert(fixed_size == UINT_MAX || fixed_size == data_size);
 
 	data_size32 = (uint32_t)data_size;
-	full_size = sizeof(field_idx) + ((data_size + 3) & ~3);
+	full_size = sizeof(field_idx) + ((data_size + 3) & ~3U);
 	if (fixed_size == UINT_MAX)
 		full_size += sizeof(data_size32);
 
@@ -886,7 +886,7 @@ bool mail_cache_field_want_add(struct mail_cache_transaction_ctx *ctx,
 	mail_cache_transaction_refresh_decisions(ctx);
 
 	decision = mail_cache_field_get_decision(ctx->view->cache, field_idx);
-	decision &= ~MAIL_CACHE_DECISION_FORCED;
+	decision &= ENUM_NEGATE(MAIL_CACHE_DECISION_FORCED);
 	switch (decision) {
 	case MAIL_CACHE_DECISION_NO:
 		return FALSE;

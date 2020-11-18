@@ -152,8 +152,8 @@ static struct passdb_oauth2_settings default_oauth2_settings = {
 	.introspection_mode = "",
 	.username_format = "%Lu",
 	.username_attribute = "email",
-	.active_attribute = "",
-	.active_value = "",
+	.active_attribute = "active",
+	.active_value = "true",
 	.client_id = "",
 	.client_secret = "",
 	.issuers = "",
@@ -257,6 +257,13 @@ struct db_oauth2 *db_oauth2_init(const char *config_path)
 	db->oauth2_set.send_auth_headers = db->set.send_auth_headers;
 	db->oauth2_set.use_grant_password = db->set.use_grant_password;
 	db->oauth2_set.scope = db->set.scope;
+
+	if (*db->set.active_attribute != '\0' &&
+	    *db->set.active_value == '\0')
+		i_fatal("oauth2: Cannot have empty active_value if active_attribute is set");
+	if (*db->set.active_attribute == '\0' &&
+	    *db->set.active_value != '\0')
+		i_fatal("oauth2: Cannot have empty active_attribute is active_value is set");
 
 	if (*db->set.introspection_mode == '\0' ||
 	    strcmp(db->set.introspection_mode, "auth") == 0) {
@@ -540,13 +547,14 @@ static bool
 db_oauth2_user_is_enabled(struct db_oauth2_request *req,
 			  enum passdb_result *result_r, const char **error_r)
 {
-	if (*req->db->set.active_attribute != '\0') {
-		const char *active_value = auth_fields_find(req->fields, req->db->set.active_attribute);
-		if (active_value == NULL ||
-		    (*req->db->set.active_value != '\0' &&
-		     strcmp(req->db->set.active_value, active_value) != 0)) {
-			*error_r = "User account is not active";
-			*result_r = PASSDB_RESULT_USER_DISABLED;
+	if (*req->db->set.active_attribute != '\0' &&
+	    *req->db->set.active_value != '\0') {
+		const char *active_value =
+			auth_fields_find(req->fields, req->db->set.active_attribute);
+		if (active_value != NULL &&
+		    strcmp(req->db->set.active_value, active_value) != 0) {
+			*error_r = "Provided token is not valid";
+			*result_r = PASSDB_RESULT_PASSWORD_MISMATCH;
 			return FALSE;
 		}
 	}
@@ -588,8 +596,8 @@ static void db_oauth2_process_fields(struct db_oauth2_request *req,
 {
 	*error_r = NULL;
 
-	if (db_oauth2_validate_username(req, result_r, error_r) &&
-	    db_oauth2_user_is_enabled(req, result_r, error_r) &&
+	if (db_oauth2_user_is_enabled(req, result_r, error_r) &&
+	    db_oauth2_validate_username(req, result_r, error_r) &&
 	    db_oauth2_token_in_scope(req, result_r, error_r) &&
 	    db_oauth2_template_export(req, result_r, error_r)) {
 		*result_r = PASSDB_RESULT_OK;
@@ -690,6 +698,8 @@ db_oauth2_lookup_continue(struct oauth2_request_result *result,
 		} else if (req->db->oauth2_set.introspection_mode == INTROSPECTION_MODE_LOCAL) {
 			db_oauth2_local_validation(req, req->token);
 			return;
+		} else if (!db_oauth2_user_is_enabled(req, &passdb_result, &error)) {
+			db_oauth2_callback(req, passdb_result, error);
 		} else if (*req->db->set.introspection_url != '\0') {
 			db_oauth2_lookup_introspect(req);
 			return;

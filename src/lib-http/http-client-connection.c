@@ -1087,7 +1087,7 @@ static void http_client_connection_input(struct connection *_conn)
 		req->response_time = ioloop_timeval;
 		req->response_offset =
 			http_response_parser_get_last_offset(conn->http_parser);
-		i_assert(req->response_offset != (uoff_t)-1);
+		i_assert(req->response_offset != UOFF_T_MAX);
 		i_assert(req->response_offset < conn->conn.input->v_offset);
 		req->bytes_in = conn->conn.input->v_offset - req->response_offset;
 
@@ -1582,8 +1582,8 @@ http_client_connection_connected(struct connection *_conn, bool success)
 }
 
 static const struct connection_settings http_client_connection_set = {
-	.input_max_size = (size_t)-1,
-	.output_max_size = (size_t)-1,
+	.input_max_size = SIZE_MAX,
+	.output_max_size = SIZE_MAX,
 	.client = TRUE,
 	.delayed_unix_client_connected_callback = TRUE,
 	.log_connection_id = TRUE,
