@@ -855,7 +855,6 @@ src/lib-storage/index/dbox-common/Makefile
 src/lib-storage/index/dbox-multi/Makefile
 src/lib-storage/index/dbox-single/Makefile
 src/lib-storage/index/abox/Makefile
-src/lib-storage/index/cydir/Makefile
 src/lib-storage/index/raw/Makefile
 src/lib-storage/index/shared/Makefile
 src/anvil/Makefile
@@ -890,8 +889,6 @@ src/util/Makefile
 src/plugins/Makefile
 src/plugins/acl/Makefile
 src/plugins/imap-acl/Makefile
-src/plugins/autocreate/Makefile
-src/plugins/expire/Makefile
 src/plugins/fs-compress/Makefile
 src/plugins/fs-s3/Makefile
 src/plugins/fts/Makefile
@@ -901,7 +898,6 @@ src/plugins/fts-squat/Makefile
 src/plugins/last-login/Makefile
 src/plugins/lazy-expunge/Makefile
 src/plugins/listescape/Makefile
-src/plugins/mail-filter/Makefile
 src/plugins/mail-log/Makefile
 src/plugins/mail-lua/Makefile
 src/plugins/mailbox-alias/Makefile
@@ -913,7 +909,6 @@ src/plugins/quota/Makefile
 src/plugins/quota-clone/Makefile
 src/plugins/imap-quota/Makefile
 src/plugins/replication/Makefile
-src/plugins/snarf/Makefile
 src/plugins/old-stats/Makefile
 src/plugins/imap-old-stats/Makefile
 src/plugins/trash/Makefile

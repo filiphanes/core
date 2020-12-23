@@ -1,15 +1,9 @@
 /* Copyright (c) 2017-2018 Dovecot authors, see the included COPYING file */
 
 #include "lib.h"
-#include "ioloop.h"
-#include "mkdir-parents.h"
-#include "unlink-directory.h"
-#include "hex-binary.h"
-#include "randgen.h"
 #include "test-common.h"
 #include "master-service.h"
-#include "mail-storage-service.h"
-#include "mail-storage-private.h"
+#include "test-mail-storage-common.h"
 
 static void test_init_storage(struct mail_storage *storage_r)
 {
@@ -30,15 +24,6 @@ static void test_deinit_storage(struct mail_storage *storage)
 	event_unref(&storage->event);
 	event_unref(&storage->user->event);
 }
-
-struct test_mail_storage_ctx {
-	pool_t pool;
-	struct mail_storage_service_ctx *storage_service;
-	struct mail_user *user;
-	struct mail_storage_service_user *service_user;
-	struct ioloop *ioloop;
-	const char *mail_home;
-};
 
 static void test_mail_storage_errors(void)
 {
@@ -219,110 +204,6 @@ static void test_mail_storage_last_error_push_pop(void)
 	test_end();
 }
 
-static void test_mail_init(struct test_mail_storage_ctx *ctx)
-{
-	const char *error;
-	char path_buf[4096];
-	unsigned char rand[4];
-
-	ctx->pool = pool_allocfree_create("test pool");
-
-	if (getcwd(path_buf, sizeof(path_buf)) == NULL)
-		i_fatal("getcwd() failed: %m");
-
-	random_fill(rand, sizeof(rand));
-	ctx->mail_home = p_strdup_printf(ctx->pool, "%s/.test-dir%s/", path_buf,
-					 binary_to_hex(rand, sizeof(rand)));
-
-	if (unlink_directory(ctx->mail_home, UNLINK_DIRECTORY_FLAG_RMDIR, &error) < 0 &&
-	    errno != ENOENT)
-		i_warning("unlink_directory(%s) failed: %s", ctx->mail_home, error);
-
-	ctx->ioloop = io_loop_create();
-
-	ctx->storage_service = mail_storage_service_init(master_service, NULL,
-		MAIL_STORAGE_SERVICE_FLAG_NO_RESTRICT_ACCESS |
-		MAIL_STORAGE_SERVICE_FLAG_NO_LOG_INIT |
-		MAIL_STORAGE_SERVICE_FLAG_NO_PLUGINS);
-}
-
-static void test_mail_deinit(struct test_mail_storage_ctx *ctx)
-{
-	const char *error;
-	mail_storage_service_deinit(&ctx->storage_service);
-
-	if (chdir(ctx->mail_home) < 0)
-		i_fatal("chdir(%s) failed: %m", ctx->mail_home);
-	if (chdir("..") < 0)
-		i_fatal("chdir(..) failed: %m");
-
-	if (unlink_directory(ctx->mail_home, UNLINK_DIRECTORY_FLAG_RMDIR,
-			     &error) < 0)
-		i_error("unlink_directory(%s) failed: %s", ctx->mail_home, error);
-
-	io_loop_destroy(&ctx->ioloop);
-
-	pool_unref(&ctx->pool);
-
-	i_zero(ctx);
-}
-
-static int test_mail_init_user(const char *user, const char *driver,
-			       const char *driver_opts, const char *sep,
-			       const char *const *extra_input,
-			       struct test_mail_storage_ctx *ctx)
-{
-	const char *error, *home;
-	ARRAY_TYPE(const_string) opts;
-
-	home = t_strdup_printf("%s%s", ctx->mail_home, user);
-
-	const char *const default_input[] = {
-		t_strdup_printf("mail=%s:~/%s", driver, driver_opts),
-		"postmaster_address=postmaster@localhost",
-		"namespace=inbox",
-		"namespace/inbox/prefix=",
-		"namespace/inbox/inbox=yes",
-		t_strdup_printf("namespace/inbox/separator=%s", sep),
-		t_strdup_printf("home=%s/%s", home, user),
-	};
-
-	if (unlink_directory(home, UNLINK_DIRECTORY_FLAG_RMDIR, &error) < 0)
-		i_error("%s", error);
-	i_assert(mkdir_parents(home, S_IRWXU)==0 || errno == EEXIST);
-
-	t_array_init(&opts, 20);
-	array_append(&opts, default_input, N_ELEMENTS(default_input));
-	if (extra_input != NULL)
-		while(*extra_input != NULL)
-			array_push_back(&opts, extra_input++);
-
-	array_append_zero(&opts);
-	struct mail_storage_service_input input = {
-		.userdb_fields = array_front(&opts),
-		.username = user,
-		.no_userdb_lookup = TRUE,
-		.debug = FALSE,
-	};
-
-	if (mail_storage_service_lookup_next(ctx->storage_service, &input,
-					     &ctx->service_user, &ctx->user,
-					     &error) < 0) {
-		 i_error("mail_storage_service_lookup_next(%s) failed: %s",
-			 user, error);
-		 return -1;
-	}
-
-	return 0;
-}
-
-#define test_mail_init_maildir_user(user) test_mail_init_user(user,"maildir","",NULL)
-static void test_mail_deinit_user(struct test_mail_storage_ctx *ctx)
-{
-	mail_user_deinit(&ctx->user);
-	mail_storage_service_user_unref(&ctx->service_user);
-}
-
 struct mailbox_verify_test_cases {
 	char ns_sep;
 	char list_sep;
@@ -450,12 +331,17 @@ static void test_mailbox_verify_name_driver_slash(const char *driver,
 		"namespace/subspace/prefix=SubSpace/",
 		NULL
 	};
-	if (test_mail_init_user("testuser", driver, driver_opts, "/", ns2, ctx) < 0)
-		return;
+	struct test_mail_storage_settings set = {
+		.driver = driver,
+		.driver_opts = driver_opts,
+		.hierarchy_sep = "/",
+		.extra_input = ns2,
+	};
+	test_mail_storage_init_user(ctx, &set);
 
 	test_mailbox_verify_name_continue(test_cases, N_ELEMENTS(test_cases), ctx);
 
-	test_mail_deinit_user(ctx);
+	test_mail_storage_deinit_user(ctx);
 }
 
 static void test_mailbox_verify_name_driver_dot(const char *driver,
@@ -468,12 +354,17 @@ static void test_mailbox_verify_name_driver_dot(const char *driver,
 		"namespace/subspace/prefix=SubSpace.",
 		NULL
 	};
-	if (test_mail_init_user("testuser", driver, driver_opts, ".", ns2, ctx) < 0)
-		return;
+	struct test_mail_storage_settings set = {
+		.driver = driver,
+		.driver_opts = driver_opts,
+		.hierarchy_sep = ".",
+		.extra_input = ns2,
+	};
+	test_mail_storage_init_user(ctx, &set);
 
 	test_mailbox_verify_name_continue(test_cases, N_ELEMENTS(test_cases), ctx);
 
-	test_mail_deinit_user(ctx);
+	test_mail_storage_deinit_user(ctx);
 }
 
 static void test_mailbox_verify_name(void)
@@ -494,20 +385,18 @@ static void test_mailbox_verify_name(void)
 		{ "mdbox LAYOUT=FS", "mdbox", ":LAYOUT=FS" },
 		{ "mdbox LAYOUT=INDEX", "mdbox", ":LAYOUT=INDEX" },
 	};
-	struct test_mail_storage_ctx ctx;
-	i_zero(&ctx);
-	test_mail_init(&ctx);
+	struct test_mail_storage_ctx *ctx = test_mail_storage_init();
 
 	for(unsigned int i = 0; i < N_ELEMENTS(test_cases); i++) T_BEGIN {
 		test_begin(t_strdup_printf("mailbox_verify_name (%s SEP=.)", test_cases[i].name));
-		test_mailbox_verify_name_driver_dot(test_cases[i].driver, test_cases[i].opts, &ctx);
+		test_mailbox_verify_name_driver_dot(test_cases[i].driver, test_cases[i].opts, ctx);
 		test_end();
 		test_begin(t_strdup_printf("mailbox_verify_name (%s SEP=/)", test_cases[i].name));
-		test_mailbox_verify_name_driver_slash(test_cases[i].driver, test_cases[i].opts, &ctx);
+		test_mailbox_verify_name_driver_slash(test_cases[i].driver, test_cases[i].opts, ctx);
 		test_end();
 	} T_END;
 
-	test_mail_deinit(&ctx);
+	test_mail_storage_deinit(&ctx);
 }
 
 static void test_mailbox_list_maildir_continue(struct test_mail_storage_ctx *ctx)
@@ -571,8 +460,13 @@ static void test_mailbox_list_maildir_init(struct test_mail_storage_ctx *ctx,
 		NULL
 	};
 
-	if (test_mail_init_user("testuser", "maildir", driver_opts, sep, ns2, ctx) < 0)
-		i_unreached();
+	struct test_mail_storage_settings set = {
+		.driver = "maildir",
+		.driver_opts = driver_opts,
+		.hierarchy_sep = sep,
+		.extra_input = ns2,
+	};
+	test_mail_storage_init_user(ctx, &set);
 	test_mailbox_list_maildir_continue(ctx);
 
 	struct mail_namespace *ns =
@@ -602,63 +496,62 @@ static void test_mailbox_list_maildir_init(struct test_mail_storage_ctx *ctx,
 #endif
 	mailbox_free(&box);
 
-	test_mail_deinit_user(ctx);
+	test_mail_storage_deinit_user(ctx);
 }
 
 static void test_mailbox_list_maildir(void)
 {
-	struct test_mail_storage_ctx ctx;
-	i_zero(&ctx);
-	test_mail_init(&ctx);
+	struct test_mail_storage_ctx *ctx = test_mail_storage_init();
 
 	test_begin("mailbox_verify_name (maildir SEP=.)");
-	test_mailbox_list_maildir_init(&ctx, "", ".");
+	test_mailbox_list_maildir_init(ctx, "", ".");
 	test_end();
 
 	test_begin("mailbox_verify_name (maildir SEP=/)");
-	test_mailbox_list_maildir_init(&ctx, "", "/");
+	test_mailbox_list_maildir_init(ctx, "", "/");
 	test_end();
 
 	test_begin("mailbox_verify_name (maildir SEP=. LAYOUT=FS)");
-	test_mailbox_list_maildir_init(&ctx, "LAYOUT=FS", ".");
+	test_mailbox_list_maildir_init(ctx, "LAYOUT=FS", ".");
 	test_end();
 
 	test_begin("mailbox_verify_name (maildir SEP=/ LAYOUT=FS)");
-	test_mailbox_list_maildir_init(&ctx, "LAYOUT=FS", "/");
+	test_mailbox_list_maildir_init(ctx, "LAYOUT=FS", "/");
 	test_end();
 
-	test_mail_deinit(&ctx);
+	test_mail_storage_deinit(&ctx);
 }
 
 static void test_mailbox_list_mbox(void)
 {
-	struct test_mail_storage_ctx ctx;
+	struct test_mail_storage_ctx *ctx;
 	struct mailbox_verify_test_cases test_case;
 	struct mail_namespace *ns;
 
-	i_zero(&ctx);
 	test_begin("mailbox_list_mbox");
 
-	test_mail_init(&ctx);
+	ctx = test_mail_storage_init();
 
 	/* check that .lock cannot be used */
-	if (test_mail_init_user("testuser", "mbox", "", ".", NULL, &ctx) < 0)
-		i_unreached();
+	struct test_mail_storage_settings set = {
+		.driver = "mbox",
+		.hierarchy_sep = ".",
+	};
+	test_mail_storage_init_user(ctx, &set);
 
 	test_case.list_sep = '/';
 	test_case.ns_sep = '.';
 	test_case.box = "INBOX/.lock";
 	test_case.ret = -1;
 
-	ns = mail_namespace_find_inbox(ctx.user->namespaces);
+	ns = mail_namespace_find_inbox(ctx->user->namespaces);
 	test_mailbox_verify_name_one(&test_case, ns, 0);
 
-	test_mail_deinit_user(&ctx);
-	test_mail_deinit(&ctx);
+	test_mail_storage_deinit_user(ctx);
+	test_mail_storage_deinit(&ctx);
 
 	test_end();
 }
-
 
 int main(int argc, char **argv)
 {

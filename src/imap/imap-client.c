@@ -1093,6 +1093,11 @@ void client_continue_pending_input(struct client *client)
 {
 	i_assert(!client->handling_input);
 
+	if (client->disconnected) {
+		client_destroy(client, NULL);
+		return;
+	}
+
 	/* this function is called at the end of I/O callbacks (and only there).
 	   fix up the command states and verify that they're correct. */
 	while (client_remove_pending_unambiguity(client)) {
@@ -1112,7 +1117,9 @@ void client_continue_pending_input(struct client *client)
 		if (!ret)
 			break;
 	}
-	if (!client->input->closed && !client->output->closed)
+	if (client->input->closed || client->output->closed)
+		client_destroy(client, NULL);
+	else
 		client_check_command_hangs(client);
 }
 
@@ -1357,10 +1364,7 @@ void client_input(struct client *client)
 	o_stream_unref(&output);
 	imap_refresh_proctitle();
 
-	if (client->disconnected)
-		client_destroy(client, NULL);
-	else
-		client_continue_pending_input(client);
+	client_continue_pending_input(client);
 }
 
 static void client_output_cmd(struct client_command_context *cmd)
@@ -1429,7 +1433,7 @@ int client_output(struct client *client)
 	client_output_commands(client);
 	(void)cmd_sync_delayed(client);
 
-	imap_refresh_proctitle();
+	imap_refresh_proctitle_delayed();
 	if (client->output->closed)
 		client_destroy(client, NULL);
 	else {

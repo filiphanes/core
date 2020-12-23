@@ -1143,9 +1143,15 @@ index_mail_parse_body_finish(struct index_mail *mail,
 		   decide if that is an error or not. (for example we
 		   could be coming here from IMAP APPEND when IMAP
 		   client has closed the connection too early. we
-		   don't want to log an error in that case.) */
-		if (parser_input->stream_errno != 0 &&
-		    parser_input->stream_errno != EPIPE) {
+		   don't want to log an error in that case.)
+		   Note that EPIPE may also come from istream-mail which
+		   detects a corrupted message size. Either way, the
+		   body wasn't successfully parsed. */
+		if (parser_input->stream_errno == 0)
+			;
+		else if (parser_input->stream_errno == EPIPE)
+			ret = -1;
+		else {
 			index_mail_stream_log_failure_for(mail, parser_input);
 			ret = -1;
 		}
@@ -1412,11 +1418,18 @@ static int index_mail_parse_bodystructure(struct index_mail *mail,
 			/* we haven't parsed the header yet */
 			const char *reason =
 				index_mail_cache_reason(&mail->mail.mail, "bodystructure");
+			bool orig_bodystructure_header =
+				data->save_bodystructure_header;
+			bool orig_bodystructure_body =
+				data->save_bodystructure_body;
 			data->save_bodystructure_header = TRUE;
 			data->save_bodystructure_body = TRUE;
 			(void)get_cached_parts(mail);
 			if (index_mail_parse_headers(mail, NULL, reason) < 0) {
-				data->save_bodystructure_header = TRUE;
+				data->save_bodystructure_header =
+					orig_bodystructure_header;
+				data->save_bodystructure_body =
+					orig_bodystructure_body;
 				return -1;
 			}
 			i_assert(data->parser_ctx != NULL);

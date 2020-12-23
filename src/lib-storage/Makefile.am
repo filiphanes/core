@@ -64,7 +64,8 @@ libstorage_la_SOURCES = \
 	mailbox-search-result.c \
 	mailbox-tree.c \
 	mailbox-uidvalidity.c \
-	mailbox-watch.c
+	mailbox-watch.c \
+	test-mail-storage-common.c
 
 headers = \
 	fail-mail-storage.h \
@@ -100,7 +101,8 @@ headers = \
 	mailbox-search-result-private.h \
 	mailbox-tree.h \
 	mailbox-uidvalidity.h \
-	mailbox-watch.h
+	mailbox-watch.h \
+	test-mail-storage-common.h
 
 shlibs = \
 	index/shared/libstorage_shared.la \
@@ -110,7 +112,6 @@ shlibs = \
 	index/abox/libstorage_abox.la \
 	index/maildir/libstorage_maildir.la \
 	index/mbox/libstorage_mbox.la \
-	index/cydir/libstorage_cydir.la \
 	index/imapc/libstorage_imapc.la \
 	../lib-imap-client/libimap_client.la \
 	index/pop3c/libstorage_pop3c.la \
@@ -135,9 +136,35 @@ libdovecot_storage_la_DEPENDENCIES = \
 	$(LIBDOVECOT_DEPS)
 libdovecot_storage_la_LDFLAGS = -export-dynamic
 
+if HAVE_LUA
+pkglib_LTLIBRARIES += libdovecot-storage-lua.la
+libdovecot_storage_lua_la_SOURCES = \
+	mail-lua.c \
+	mail-user-lua.c \
+	mail-storage-lua.c \
+	mailbox-lua.c \
+	mailbox-attribute-lua.c
+libdovecot_storage_lua_la_CPPFLAGS = \
+	$(AM_CPPFLAGS) \
+	$(LUA_CFLAGS) \
+	-I$(top_srcdir)/src/lib-lua
+libdovecot_storage_lua_la_LIBADD = \
+	libdovecot-storage.la \
+	../lib-lua/libdovecot-lua.la
+libdovecot_storage_lua_la_DEPENDENCIES = \
+	libdovecot-storage.la \
+	../lib-lua/libdovecot-lua.la
+libdovecot_storage_lua_la_LDFLAGS = -export-dynamic
+
+headers += \
+	mail-storage-lua.h \
+	mail-storage-lua-private.h
+endif
+
 test_programs = \
 	test-mail-search-args-imap \
 	test-mail-search-args-simplify \
+	test-mail \
 	test-mail-storage \
 	test-mailbox-get
 
@@ -158,6 +185,10 @@ test_mail_search_args_simplify_DEPENDENCIES = libstorage.la $(LIBDOVECOT_DEPS)
 test_mailbox_get_SOURCES = test-mailbox-get.c
 test_mailbox_get_LDADD = mailbox-get.lo $(test_libs)
 test_mailbox_get_DEPENDENCIES = $(noinst_LTLIBRARIES) $(test_libs)
+
+test_mail_SOURCES = test-mail.c
+test_mail_LDADD = libstorage.la $(LIBDOVECOT)
+test_mail_DEPENDENCIES = libstorage.la $(LIBDOVECOT_DEPS)
 
 test_mail_storage_SOURCES = test-mail-storage.c
 test_mail_storage_LDADD = libstorage.la $(LIBDOVECOT)
