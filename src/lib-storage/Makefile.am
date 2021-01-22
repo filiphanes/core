@@ -166,7 +166,8 @@ test_programs = \
 	test-mail-search-args-simplify \
 	test-mail \
 	test-mail-storage \
-	test-mailbox-get
+	test-mailbox-get \
+	test-mailbox-list
 
 noinst_PROGRAMS = $(test_programs)
 
@@ -193,6 +194,10 @@ test_mail_DEPENDENCIES = libstorage.la $(LIBDOVECOT_DEPS)
 test_mail_storage_SOURCES = test-mail-storage.c
 test_mail_storage_LDADD = libstorage.la $(LIBDOVECOT)
 test_mail_storage_DEPENDENCIES = libstorage.la $(LIBDOVECOT_DEPS)
+
+test_mailbox_list_SOURCES = test-mailbox-list.c
+test_mailbox_list_LDADD = libstorage.la $(LIBDOVECOT)
+test_mailbox_list_DEPENDENCIES = libstorage.la $(LIBDOVECOT_DEPS)
 
 check-local:
 	for bin in $(test_programs); do \
